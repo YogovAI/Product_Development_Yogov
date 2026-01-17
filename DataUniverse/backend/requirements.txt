@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+sqlalchemy[asyncio]
+asyncpg
+pgvector
+pandas
+openpyxl
+boto3
+pyarrow
+pyyaml
+dask[complete]
+distributed
+bokeh

@@ -1,0 +1,2 @@
+/usr/local/hadoop
+/usr/local/spark

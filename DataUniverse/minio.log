@@ -1,0 +1,17 @@
+nohup: ignoring input
+MinIO Object Storage Server
+Copyright: 2015-2026 MinIO, Inc.
+License: GNU AGPLv3 - https://www.gnu.org/licenses/agpl-3.0.html
+Version: RELEASE.2025-04-22T22-12-26Z (go1.24.2 linux/amd64)
+
+API: http://0.0.0.0:9700 
+WebUI: http://192.168.1.12:9701 http://172.16.136.1:9701 http://172.16.252.1:9701 http://172.17.0.1:9701 http://127.0.0.1:9701 
+
+Docs: https://docs.min.io
+WARN: Detected default credentials 'minioadmin:minioadmin', we recommend that you change these values with 'MINIO_ROOT_USER' and 'MINIO_ROOT_PASSWORD' environment variables
+INFO: 
+ You are running an older version of MinIO released 4 months before the latest release 
+ Update: Run `mc admin update ALIAS` 
+
+
+INFO: Exiting on signal: TERMINATED
