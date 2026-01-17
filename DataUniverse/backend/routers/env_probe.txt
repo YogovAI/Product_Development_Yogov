@@ -1,0 +1,12 @@
+SHELL=/bin/bash
+LANGUAGE=en_IN:en
+PWD=/
+SYSTEMD_EXEC_PID=749
+_=/usr/bin/env
+HOME=/home/hduser
+LANG=en_IN
+INVOCATION_ID=fa1423c99c6e487a87bf1abf26c222ff
+USER=hduser
+SHLVL=1
+JOURNAL_STREAM=8:21981
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin

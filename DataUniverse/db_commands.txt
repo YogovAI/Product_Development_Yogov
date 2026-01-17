@@ -1,0 +1,9 @@
+docker exec -it timescaledb psql -U odoo18 -d odoo_db
+
+
+
+CREATE EXTENSION IF NOT EXISTS timescaledb;
+CREATE EXTENSION IF NOT EXISTS vector;
+
+
+\dx
