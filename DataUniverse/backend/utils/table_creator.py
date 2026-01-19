@@ -11,13 +11,28 @@ logger = logging.getLogger(__name__)
 
 class TableCreator:
     """Create PostgreSQL tables dynamically"""
+
+    @staticmethod
+    async def table_exists(db: AsyncSession, table_name: str) -> bool:
+        table_name = TableCreator._sanitize_table_name(table_name)
+        q = text(
+            "SELECT EXISTS ("
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema='public' AND table_name=:tname"
+            ")"
+        )
+        res = await db.execute(q, {"tname": table_name})
+        return bool(res.scalar())
     
     @staticmethod
     async def create_table(
         db: AsyncSession,
         table_name: str,
         schema: Dict[str, str],
-        drop_if_exists: bool = True
+        drop_if_exists: bool = True,
+        include_auto_id: bool = True,
+        primary_key: str | None = None,
+        not_null: List[str] | None = None
     ) -> Dict[str, any]:
         """
         Create a table in PostgreSQL with the given schema
@@ -45,10 +60,19 @@ class TableCreator:
             columns = []
             for col_name, col_type in schema.items():
                 sanitized_col = TableCreator._sanitize_column_name(col_name)
-                columns.append(f"{sanitized_col} {col_type}")
+                nn = ""
+                if not_null and sanitized_col in {TableCreator._sanitize_column_name(x) for x in not_null}:
+                    nn = " NOT NULL"
+                columns.append(f"{sanitized_col} {col_type}{nn}")
             
-            # Add auto-increment ID column
-            columns.insert(0, "id SERIAL PRIMARY KEY")
+            # Add auto-increment ID column (optional)
+            # Only add if 'id' is not already in the provided schema
+            sanitized_schema_cols = {TableCreator._sanitize_column_name(c) for c in schema.keys()}
+            if include_auto_id and "id" not in sanitized_schema_cols:
+                columns.insert(0, "id BIGSERIAL PRIMARY KEY")
+            elif primary_key:
+                pk_col = TableCreator._sanitize_column_name(primary_key)
+                columns.append(f"PRIMARY KEY ({pk_col})")
             columns.append("created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
             
             create_sql = f"""
@@ -101,40 +125,36 @@ class TableCreator:
             # Process in batches
             for i in range(0, total_rows, batch_size):
                 batch = data[i:i + batch_size]
-                
                 if not batch:
                     continue
                 
-                # Get column names from first row
-                columns = [TableCreator._sanitize_column_name(col) for col in batch[0].keys()]
-                column_str = ', '.join(columns)
+                # Get sanitized column names
+                cols_raw = list(batch[0].keys())
+                sanitized_cols = [TableCreator._sanitize_column_name(col) for col in cols_raw]
+                column_str = ', '.join(sanitized_cols)
                 
-                # Build VALUES clause
-                values_list = []
-                for row in batch:
-                    values = []
-                    for col in batch[0].keys():
-                        value = row.get(col)
-                        if value is None or (isinstance(value, float) and pd.isna(value)):
-                            values.append('NULL')
-                        elif isinstance(value, str):
-                            # Escape single quotes
-                            escaped_value = value.replace("'", "''")
-                            values.append(f"'{escaped_value}'")
-                        elif isinstance(value, (int, float)):
-                            values.append(str(value))
-                        else:
-                            values.append(f"'{str(value)}'")
-                    values_list.append(f"({', '.join(values)})")
+                # Build placeholders and params for this batch
+                all_params = {}
+                rows_placeholders = []
                 
-                insert_sql = f"""
-                    INSERT INTO {table_name} ({column_str})
-                    VALUES {', '.join(values_list)}
-                """
+                for r_idx, row in enumerate(batch):
+                    placeholders = []
+                    for c_idx, col_name in enumerate(cols_raw):
+                        param_key = f"r{r_idx}c{c_idx}"
+                        placeholders.append(f":{param_key}")
+                        
+                        val = row.get(col_name)
+                        # Handle NaN for pandas compatibility
+                        if isinstance(val, float) and pd.isna(val):
+                            val = None
+                        all_params[param_key] = val
+                        
+                    rows_placeholders.append(f"({', '.join(placeholders)})")
                 
-                await db.execute(text(insert_sql))
+                insert_sql = f"INSERT INTO {table_name} ({column_str}) VALUES {', '.join(rows_placeholders)}"
+                
+                await db.execute(text(insert_sql), all_params)
                 inserted_rows += len(batch)
-                
                 logger.info(f"Inserted batch {i//batch_size + 1}: {len(batch)} rows")
             
             await db.commit()

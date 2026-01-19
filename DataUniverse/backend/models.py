@@ -76,3 +76,29 @@ class ExtractorService(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     source = relationship("DataSource")
+
+class MapperService(Base):
+    __tablename__ = "mapper_services"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, index=True)
+    extractor_id = Column(Integer, ForeignKey("extractor_services.id"))
+    template_id = Column(Integer, ForeignKey("transform_templates.id"))
+    mapping_config = Column(JSON) # Detailed column level mappings
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    extractor = relationship("ExtractorService")
+    template = relationship("TransformTemplate")
+
+class LoaderService(Base):
+    __tablename__ = "loader_services"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, index=True)
+    mapper_service_id = Column(Integer, ForeignKey("mapper_services.id"))
+    target_entity_name = Column(String, nullable=True)
+    status = Column(String, default="active")
+    load_type = Column(String, default="batch") # batch, streaming
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    mapper_service = relationship("MapperService")

@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useNavigate, useLocation } from 'react-router-dom';
 import {
     Plus,
     Trash2,
@@ -6,25 +7,31 @@ import {
     CheckCircle,
     Database,
     ArrowRight,
-    Search,
-    Filter,
-    ChevronDown
+    ChevronDown,
+    Wand2,
+    FileJson,
+    Save
 } from 'lucide-react';
+import yaml from 'js-yaml';
 import {
     createTransformTemplate,
     getTransformTemplates,
     deleteTransformTemplate,
+    updateTransformTemplate,
     type TransformTemplate,
     getSources,
     testConnection,
     type DataSource,
     getTables,
-    getColumns
+    getColumns,
+    getExtractors,
+    type ExtractorService,
+    generateBusinessRules
 } from '../lib/api';
 
-
-
 export default function TransformTemplatePage() {
+    const navigate = useNavigate();
+    const location = useLocation() as any;
     const [templates, setTemplates] = useState<TransformTemplate[]>([]);
     const [sources, setSources] = useState<DataSource[]>([]);
     const [selectedTargetType, setSelectedTargetType] = useState<string>('');
@@ -36,12 +43,93 @@ export default function TransformTemplatePage() {
     const [templateName, setTemplateName] = useState('');
     const [templateDescription, setTemplateDescription] = useState('');
     const [columns, setColumns] = useState<any[]>([]);
+    const [extractors, setExtractors] = useState<ExtractorService[]>([]);
+    const [selectedExtractorId, setSelectedExtractorId] = useState<number | null>(null);
     const [isSaving, setIsSaving] = useState(false);
     const [activeTab, setActiveTab] = useState<'create' | 'list'>('list');
+    const [editingTemplateId, setEditingTemplateId] = useState<number | null>(null);
+    const [businessRulesEnglish, setBusinessRulesEnglish] = useState('');
+
+    // New State for Advanced Configuration
+    const [schemaJsonString, setSchemaJsonString] = useState('{\n  "columns": []\n}');
+    const [businessRulesJsonString, setBusinessRulesJsonString] = useState('[\n\n]');
+    const [finalYaml, setFinalYaml] = useState('');
+    const [isGeneratingRules, setIsGeneratingRules] = useState(false);
+    const [lastSavedSchema, setLastSavedSchema] = useState<any>(null);
 
     useEffect(() => {
         loadData();
     }, []);
+
+    useEffect(() => {
+        const editTemplate: TransformTemplate | undefined = location?.state?.editTemplate;
+        if (editTemplate) {
+            setEditingTemplateId(editTemplate.id);
+            setActiveTab('create');
+            setTemplateName(editTemplate.name);
+            setTemplateDescription(editTemplate.description || '');
+            setSelectedTargetType(editTemplate.target_type || '');
+            setSelectedTargetSourceId(editTemplate.target_source_id || null);
+            setTargetLoadType(editTemplate.target_entity_type || '');
+            setTargetEntityName(editTemplate.target_entity_name || '');
+            setColumns(editTemplate.config?.columns || []);
+            setBusinessRulesEnglish(editTemplate.config?.business_rules?.english || '');
+            setBusinessRulesJsonString(editTemplate.config?.business_rules?.json_source || '[\n\n]');
+            setFinalYaml(editTemplate.config?.business_rules?.final_yaml || '');
+
+            // Auto-hydrate columns when editing existing template if missing
+            if ((editTemplate.target_entity_type === 'single_table') &&
+                (!editTemplate.config?.columns || editTemplate.config.columns.length === 0) &&
+                editTemplate.target_source_id && editTemplate.target_entity_name) {
+                hydrateColumnsFromTable(editTemplate.target_source_id, editTemplate.target_entity_name);
+            }
+
+            if ((editTemplate.target_entity_type === 'adhoc') &&
+                (!editTemplate.config?.columns || editTemplate.config.columns.length === 0)) {
+                getExtractors()
+                    .then(exData => {
+                        setExtractors(exData);
+                        const first = exData[0];
+                        if (first) {
+                            hydrateColumnsFromExtractor(first.id);
+                            setSelectedExtractorId(first.id);
+                        }
+                    })
+                    .catch(err => console.error("Failed to load extractors", err));
+            }
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [location?.state]);
+
+    // Live JSON schema preview from current columns - updates the editable text area
+    useEffect(() => {
+        const schema = buildSchemaFromColumns(columns);
+        setSchemaJsonString(JSON.stringify(schema, null, 2));
+    }, [columns]);
+
+    // Update Final YAML when Schema or Rules change
+    useEffect(() => {
+        try {
+            const schemaObj = JSON.parse(schemaJsonString);
+            let rulesObj = [];
+            try {
+                rulesObj = JSON.parse(businessRulesJsonString);
+            } catch (e) {
+                // If rules are invalid JSON, just use empty array or ignore for now
+                console.warn("Invalid rules JSON");
+            }
+
+            const unified = {
+                ...schemaObj,
+                business_rules: rulesObj
+            };
+
+            const yamlStr = yaml.dump(unified);
+            setFinalYaml(yamlStr);
+        } catch (e) {
+            console.error("Failed to generate YAML", e);
+        }
+    }, [schemaJsonString, businessRulesJsonString]);
 
     const loadData = async () => {
         try {
@@ -84,23 +172,129 @@ export default function TransformTemplatePage() {
                 console.error("Failed to fetch tables", error);
             }
         }
-    };
 
-    const handleUpdateRule = (colIndex: number, ruleType: 'quality' | 'business', key: string, value: any) => {
-        const newCols = [...columns];
-        if (ruleType === 'quality') {
-            newCols[colIndex].quality_rules[key] = value;
-        } else {
-            // Handle business rules (stored as array of strings)
-            if (key === 'add') {
-                newCols[colIndex].business_rules.push('');
-            } else if (key === 'remove') {
-                newCols[colIndex].business_rules.splice(parseInt(value), 1);
-            } else {
-                newCols[colIndex].business_rules[parseInt(key)] = value;
+        if (type === 'adhoc') {
+            try {
+                const exData = await getExtractors();
+                setExtractors(exData);
+            } catch (error) {
+                console.error("Failed to load extractors", error);
             }
         }
-        setColumns(newCols);
+    };
+
+    const mapToColumnShape = (field: { name: string; type: string }) => {
+        const normalized = (field.type || '').toLowerCase();
+        let pg = 'TEXT';
+        if (normalized.includes('int')) pg = 'INTEGER';
+        else if (normalized.includes('float') || normalized.includes('double')) pg = 'DOUBLE PRECISION';
+        else if (normalized.includes('bool')) pg = 'BOOLEAN';
+        else if (normalized.includes('time') || normalized.includes('date')) pg = 'TIMESTAMP';
+        return {
+            name: field.name,
+            data_type: field.type,
+            quality_rules: { primary_key: false, not_null: false, format: '' },
+            business_rules: [],
+            constraints: { pg_type: pg, primary_key: false, not_null: false }
+        };
+    };
+
+    const buildSchemaFromColumns = (cols: any[]) => {
+        const schemaCols = (cols || [])
+            .filter(c => c)
+            .map(c => {
+                const name = c.name || c.column_name;
+                if (!name) return null;
+                const constraints = c.constraints || {};
+                const qr = c.quality_rules || {};
+                return {
+                    name,
+                    data_type: c.data_type || c.type,
+                    pg_type: constraints.pg_type,
+                    primary_key: Boolean(constraints.primary_key || qr.primary_key),
+                    not_null: Boolean(constraints.not_null || qr.not_null)
+                };
+            })
+            .filter(Boolean);
+        return { columns: schemaCols };
+    };
+
+    const hydrateColumnsFromTable = async (sourceId: number, tableName: string) => {
+        try {
+            const cols = await getColumns(sourceId, tableName);
+            console.log('🔎 hydrateColumnsFromTable raw cols:', cols);
+            const shaped = cols.map((c: any) =>
+                mapToColumnShape({
+                    name: c.name || c.column_name || '',
+                    type: c.data_type || c.type || 'text'
+                })
+            );
+            console.log('🔎 hydrateColumnsFromTable shaped cols:', shaped);
+            setColumns(shaped);
+        } catch (error) {
+            console.error("Failed to fetch columns", error);
+        }
+    };
+
+    const hydrateColumnsFromExtractor = (extractorId: number) => {
+        const extractor = extractors.find(e => e.id === extractorId);
+        if (extractor && extractor.schema_info) {
+            let fields = [];
+            try {
+                const info = typeof extractor.schema_info === 'string'
+                    ? JSON.parse(extractor.schema_info)
+                    : extractor.schema_info;
+
+                fields = info.fields || info.schema || [];
+                if (Array.isArray(info)) fields = info;
+            } catch (e) {
+                console.error("Failed to parse extractor schema_info", e);
+            }
+
+            const shapedColumns = fields.map((f: any) => mapToColumnShape({ name: f.name, type: f.type || f.data_type || 'text' }));
+            setColumns(shapedColumns);
+
+            // Create schema with metadata
+            const schemaWithMetadata = {
+                metadata: {
+                    total_records: extractor.records_count || 0,
+                    memory_size: extractor.data_volume || '0MB'
+                },
+                columns: buildSchemaFromColumns(shapedColumns).columns
+            };
+
+            setSchemaJsonString(JSON.stringify(schemaWithMetadata, null, 2));
+        }
+    };
+
+    const updateColumnsFromManualSchema = () => {
+        try {
+            const schema = JSON.parse(schemaJsonString);
+            if (schema && schema.columns) {
+                const updatedColumns = schema.columns.map((col: any) => ({
+                    name: col.name,
+                    data_type: col.data_type,
+                    quality_rules: {
+                        primary_key: col.primary_key,
+                        not_null: col.not_null,
+                        format: ''
+                    },
+                    business_rules: [],
+                    constraints: {
+                        pg_type: col.pg_type,
+                        primary_key: col.primary_key,
+                        not_null: col.not_null
+                    }
+                }));
+                setColumns(updatedColumns);
+                setLastSavedSchema(schema);
+                alert("Schema configuration saved! These columns are now available for rules.");
+            } else {
+                alert("Invalid schema format: 'columns' array missing.");
+            }
+        } catch (e) {
+            alert("JSON Syntax Error: Please check your schema configuration.");
+        }
     };
 
     const handleSaveTemplate = async () => {
@@ -111,16 +305,31 @@ export default function TransformTemplatePage() {
 
         setIsSaving(true);
         try {
-            await createTransformTemplate({
+            const payload = {
                 name: templateName,
                 description: templateDescription,
                 target_type: selectedTargetType,
                 target_source_id: selectedTargetSourceId,
                 target_entity_type: targetLoadType,
                 target_entity_name: targetEntityName,
-                config: { columns }
-            });
-            alert("Template saved successfully!");
+                config: {
+                    columns,
+                    business_rules: {
+                        english: businessRulesEnglish,
+                        json_source: businessRulesJsonString,
+                        final_yaml: finalYaml
+                    }
+                }
+            };
+
+            if (editingTemplateId) {
+                await updateTransformTemplate(editingTemplateId, payload as any);
+                alert("Template updated successfully!");
+            } else {
+                await createTransformTemplate(payload as any);
+                alert("Template saved successfully!");
+            }
+            // Reset state
             setTemplateName('');
             setTemplateDescription('');
             setSelectedTargetType('');
@@ -128,6 +337,11 @@ export default function TransformTemplatePage() {
             setTargetLoadType('');
             setTargetEntityName('');
             setColumns([]);
+            setEditingTemplateId(null);
+            setBusinessRulesEnglish('');
+            setSchemaJsonString('{\n  "columns": []\n}');
+            setBusinessRulesJsonString('[\n\n]');
+            setFinalYaml('');
             setActiveTab('list');
             loadData();
         } catch (error) {
@@ -204,7 +418,10 @@ export default function TransformTemplatePage() {
                                 </div>
                             </div>
 
-                            <button className="w-full py-3 bg-white border-2 border-indigo-50 text-indigo-600 font-bold rounded-2xl group-hover:border-indigo-600 transition-all flex items-center justify-center gap-2">
+                            <button
+                                onClick={() => navigate(`/transform/${template.id}`)}
+                                className="w-full py-3 bg-white border-2 border-indigo-50 text-indigo-600 font-bold rounded-2xl group-hover:border-indigo-600 transition-all flex items-center justify-center gap-2"
+                            >
                                 View Details <ArrowRight size={16} />
                             </button>
                         </div>
@@ -299,34 +516,15 @@ export default function TransformTemplatePage() {
                                                         <option value="">Select Target Source...</option>
                                                         {sources
                                                             .filter(s => {
-                                                                console.log('Filtering source:', s.name, 'source_type:', s.source_type, 'type:', s.type, 'selectedTargetType:', selectedTargetType);
-
                                                                 // Direct match on source_type or type
-                                                                if (s.source_type === selectedTargetType) {
-                                                                    console.log('  ✓ Matched on source_type');
-                                                                    return true;
-                                                                }
-                                                                if (s.type === selectedTargetType) {
-                                                                    console.log('  ✓ Matched on type');
-                                                                    return true;
-                                                                }
+                                                                if (s.source_type === selectedTargetType) return true;
+                                                                if (s.type === selectedTargetType) return true;
 
-                                                                // Fuzzy matching for backward compatibility
+                                                                // Fuzzy matching
                                                                 const type = (s.type || '').toLowerCase();
-                                                                if (selectedTargetType === 'RDBMS' && ['postgres', 'mysql', 'mssql', 'oracle', 'sqlite', 'sql', 'database'].some(t => type.includes(t))) {
-                                                                    console.log('  ✓ Matched RDBMS fuzzy');
-                                                                    return true;
-                                                                }
-                                                                if (selectedTargetType === 'Flat Files' && ['csv', 'excel', 'json', 'xml', 'parquet', 'file'].some(t => type.includes(t))) {
-                                                                    console.log('  ✓ Matched Flat Files fuzzy');
-                                                                    return true;
-                                                                }
-                                                                if (selectedTargetType === 'NO SQL' && ['mongo', 'cassandra', 'redis'].some(t => type.includes(t))) {
-                                                                    console.log('  ✓ Matched NO SQL fuzzy');
-                                                                    return true;
-                                                                }
-
-                                                                console.log('  ✗ No match');
+                                                                if (selectedTargetType === 'RDBMS' && ['postgres', 'mysql', 'mssql', 'oracle', 'sqlite', 'sql', 'database'].some(t => type.includes(t))) return true;
+                                                                if (selectedTargetType === 'Flat Files' && ['csv', 'excel', 'json', 'xml', 'parquet', 'file'].some(t => type.includes(t))) return true;
+                                                                if (selectedTargetType === 'NO SQL' && ['mongo', 'cassandra', 'redis'].some(t => type.includes(t))) return true;
                                                                 return false;
                                                             })
                                                             .map(source => (
@@ -388,12 +586,7 @@ export default function TransformTemplatePage() {
                                                                 const tableName = e.target.value;
                                                                 setTargetEntityName(tableName);
                                                                 if (tableName && selectedTargetSourceId) {
-                                                                    try {
-                                                                        const cols = await getColumns(selectedTargetSourceId, tableName);
-                                                                        setColumns(cols);
-                                                                    } catch (error) {
-                                                                        console.error("Failed to fetch columns", error);
-                                                                    }
+                                                                    await hydrateColumnsFromTable(selectedTargetSourceId, tableName);
                                                                 }
                                                             }}
                                                         >
@@ -419,6 +612,39 @@ export default function TransformTemplatePage() {
                                                         value={targetEntityName}
                                                         onChange={e => setTargetEntityName(e.target.value)}
                                                     />
+                                                    <div className="mt-4 space-y-2">
+                                                        <div className="flex items-center justify-between">
+                                                            <label className="block text-xs font-extrabold text-indigo-600 uppercase tracking-wider">Seed Columns From Extractor</label>
+                                                            <button
+                                                                onClick={async () => {
+                                                                    try {
+                                                                        const exData = await getExtractors();
+                                                                        setExtractors(exData);
+                                                                    } catch (err) {
+                                                                        console.error("Failed to load extractors", err);
+                                                                    }
+                                                                }}
+                                                                className="text-xs font-bold text-indigo-600 hover:text-indigo-800"
+                                                            >
+                                                                Refresh
+                                                            </button>
+                                                        </div>
+                                                        <select
+                                                            className="w-full p-4 bg-gray-50 border-2 border-transparent focus:border-indigo-600 focus:bg-white rounded-2xl transition-all outline-none font-bold text-slate-700"
+                                                            value={selectedExtractorId || ''}
+                                                            onChange={e => {
+                                                                const id = Number(e.target.value);
+                                                                setSelectedExtractorId(id);
+                                                                hydrateColumnsFromExtractor(id);
+                                                            }}
+                                                        >
+                                                            <option value="">Select extractor...</option>
+                                                            {extractors.map(ex => (
+                                                                <option key={ex.id} value={ex.id}>{ex.name}</option>
+                                                            ))}
+                                                        </select>
+                                                        <p className="text-xs text-gray-500">If selected, columns & types are pulled from the extractor's schema_info.</p>
+                                                    </div>
                                                 </div>
                                             )}
 
@@ -463,17 +689,10 @@ export default function TransformTemplatePage() {
                                     <span className="text-xs font-medium text-slate-400">Total Fields:</span>
                                     <span className="font-bold text-indigo-400">{columns.length}</span>
                                 </div>
+                                {/* Quality Gates based on JSON schema fields in 'columns', just fallback to length for now since we removed direct column editing */}
                                 <div className="flex justify-between items-center bg-white/5 p-3 rounded-xl">
-                                    <span className="text-xs font-medium text-slate-400">Quality Gates:</span>
-                                    <span className="font-bold text-emerald-400">
-                                        {columns.reduce((acc, col) => acc + Object.values(col.quality_rules).filter(v => v === true || v !== '').length, 0)}
-                                    </span>
-                                </div>
-                                <div className="flex justify-between items-center bg-white/5 p-3 rounded-xl">
-                                    <span className="text-xs font-medium text-slate-400">Business Logic:</span>
-                                    <span className="font-bold text-amber-400">
-                                        {columns.reduce((acc, col) => acc + col.business_rules.length, 0)}
-                                    </span>
+                                    <span className="text-xs font-medium text-slate-400">Schema Version:</span>
+                                    <span className="font-bold text-emerald-400">v1.0</span>
                                 </div>
                             </div>
                             <button
@@ -491,127 +710,145 @@ export default function TransformTemplatePage() {
                         </div>
                     </div>
 
-                    <div className="lg:col-span-8 flex flex-col h-[700px]">
-                        <div className="glass-panel p-6 rounded-3xl shadow-xl overflow-hidden flex flex-col">
-                            <div className="flex justify-between items-center mb-6">
+                    <div className="lg:col-span-8 flex flex-col h-full space-y-6">
+
+                        <div className="glass-panel p-6 rounded-3xl shadow-xl flex flex-col">
+                            <div className="flex justify-between items-center mb-4">
                                 <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2">
-                                    <Filter className="text-indigo-600" size={20} />
-                                    Rule Configuration
+                                    <Database className="text-indigo-600" size={20} />
+                                    Schema Configuration
                                 </h2>
-                                <div className="relative">
-                                    <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" size={16} />
-                                    <input
-                                        type="text"
-                                        placeholder="Search columns..."
-                                        className="pl-11 pr-4 py-2 bg-gray-50 border-transparent focus:bg-white focus:ring-2 focus:ring-indigo-100 rounded-xl text-sm transition-all outline-none w-64"
+                                <button
+                                    onClick={updateColumnsFromManualSchema}
+                                    className="px-4 py-2 bg-indigo-600 text-white text-xs font-bold rounded-xl shadow-lg hover:bg-indigo-500 transition-all flex items-center gap-2"
+                                >
+                                    <Save size={14} /> Save Schema Configuration
+                                </button>
+                            </div>
+                            <p className="text-xs text-gray-500 mb-2 italic">You can rename columns or change types directly in the JSON above. Click Save once done.</p>
+                            <div className="relative flex-1">
+                                <textarea
+                                    className="w-full h-48 p-4 bg-slate-900 text-emerald-400 font-mono text-xs rounded-xl border-none focus:ring-2 focus:ring-indigo-500 shadow-inner custom-scrollbar"
+                                    value={schemaJsonString}
+                                    onChange={(e) => setSchemaJsonString(e.target.value)}
+                                    spellCheck={false}
+                                />
+                            </div>
+                        </div>
+
+                        {/* 2. Business Rules */}
+                        <div className="glass-panel p-6 rounded-3xl shadow-xl flex flex-col">
+                            <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2 mb-4">
+                                <Wand2 className="text-indigo-600" size={20} />
+                                Business Rules Configuration
+                            </h2>
+
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                {/* AI Assistant */}
+                                <div className="space-y-3">
+                                    <div className="flex justify-between items-center mb-1">
+                                        <label className="block text-xs font-black text-gray-400 uppercase tracking-widest">
+                                            AI Assistant (English Input)
+                                        </label>
+                                        {lastSavedSchema && (
+                                            <div className="flex items-center gap-1.5 px-2 py-1 bg-emerald-50 text-emerald-600 rounded-lg text-[10px] font-bold border border-emerald-100">
+                                                <CheckCircle size={10} /> Columns Fetched
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    <div className="flex flex-wrap gap-1.5 mb-2 max-h-20 overflow-y-auto p-2 bg-slate-50 rounded-xl border border-slate-100">
+                                        {columns.length > 0 ? columns.map(col => (
+                                            <span key={col.name} className="px-2 py-0.5 bg-white border border-slate-200 text-slate-600 rounded-md text-[10px] font-bold shadow-sm">
+                                                {col.name}
+                                            </span>
+                                        )) : (
+                                            <span className="text-[10px] text-slate-400 italic">No columns saved yet...</span>
+                                        )}
+                                    </div>
+
+                                    <textarea
+                                        className="w-full p-4 bg-white border-2 border-indigo-50 rounded-2xl text-sm font-medium focus:border-indigo-500 focus:bg-indigo-50/30 transition-all outline-none resize-none h-32"
+                                        placeholder="Describe your rules... (e.g., Make order_id primary key)"
+                                        value={businessRulesEnglish}
+                                        onChange={(e) => setBusinessRulesEnglish(e.target.value)}
+                                    />
+                                    <button
+                                        onClick={async () => {
+                                            if (!businessRulesEnglish) return;
+                                            setIsGeneratingRules(true);
+                                            try {
+                                                // Enhance prompt with column context if available
+                                                const contextPrompt = columns.length > 0
+                                                    ? `Based on existing columns [${columns.map(c => c.name).join(', ')}]: ${businessRulesEnglish}`
+                                                    : businessRulesEnglish;
+
+                                                const rules = await generateBusinessRules(contextPrompt);
+                                                setBusinessRulesJsonString(JSON.stringify(rules, null, 2));
+                                            } catch (error) {
+                                                console.error("Failed to generate rules", error);
+                                                alert("Failed to generate rules. Please try again.");
+                                            } finally {
+                                                setIsGeneratingRules(false);
+                                            }
+                                        }}
+                                        disabled={isGeneratingRules || !businessRulesEnglish}
+                                        className="w-full py-2.5 bg-gradient-to-r from-indigo-600 to-purple-600 text-white font-bold rounded-xl shadow-lg shadow-indigo-200 hover:shadow-indigo-300 active:scale-95 transition-all flex items-center justify-center gap-2"
+                                    >
+                                        {isGeneratingRules ? (
+                                            <>
+                                                <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                                                Processing with AI...
+                                            </>
+                                        ) : (
+                                            <>
+                                                <Wand2 size={16} /> Fetch Schema & Generate Rules
+                                            </>
+                                        )}
+                                    </button>
+                                </div>
+
+                                {/* JSON Rules Editor */}
+                                <div className="space-y-3">
+                                    <label className="block text-xs font-black text-gray-400 uppercase tracking-widest flex justify-between">
+                                        <span>Rules Specification (JSON)</span>
+                                        <span className="text-emerald-500">Editable</span>
+                                    </label>
+                                    <textarea
+                                        className="w-full h-44 p-4 bg-slate-900 text-yellow-300 font-mono text-xs rounded-xl border-none focus:ring-2 focus:ring-indigo-500 shadow-inner custom-scrollbar"
+                                        value={businessRulesJsonString}
+                                        onChange={(e) => setBusinessRulesJsonString(e.target.value)}
+                                        spellCheck={false}
+                                        placeholder="[]"
                                     />
                                 </div>
                             </div>
+                        </div>
 
-                            <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar">
-                                {columns.length > 0 ? (
-                                    <div className="space-y-4">
-                                        {columns.map((col, idx) => (
-                                            <div key={idx} className="p-6 bg-gray-50 border-2 border-gray-100 rounded-3xl hover:border-indigo-200 transition-all">
-                                                <div className="flex items-center justify-between mb-6">
-                                                    <div className="flex items-center gap-4">
-                                                        <div className="w-10 h-10 bg-white flex items-center justify-center rounded-xl font-bold text-indigo-600 shadow-sm">
-                                                            {idx + 1}
-                                                        </div>
-                                                        <div>
-                                                            <h4 className="font-bold text-gray-800">{col.name}</h4>
-                                                            <span className="text-xs font-bold text-gray-400 bg-white px-2 py-0.5 rounded-lg border border-gray-100">{col.data_type}</span>
-                                                        </div>
-                                                    </div>
-                                                </div>
-
-                                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                                    {/* Quality Rules */}
-                                                    <div className="space-y-3">
-                                                        <span className="text-[10px] font-black text-gray-400 uppercase tracking-[2px] mb-2 block">Quality Rules</span>
-                                                        <label className="flex items-center gap-3 p-3 bg-white rounded-2xl cursor-pointer hover:shadow-sm transition-all border border-transparent hover:border-indigo-100">
-                                                            <input
-                                                                type="checkbox"
-                                                                className="w-5 h-5 rounded-lg text-indigo-600 focus:ring-indigo-500"
-                                                                checked={col.quality_rules.primary_key}
-                                                                onChange={e => handleUpdateRule(idx, 'quality', 'primary_key', e.target.checked)}
-                                                            />
-                                                            <span className="text-sm font-semibold text-gray-700">Primary Key</span>
-                                                        </label>
-                                                        <label className="flex items-center gap-3 p-3 bg-white rounded-2xl cursor-pointer hover:shadow-sm transition-all border border-transparent hover:border-indigo-100">
-                                                            <input
-                                                                type="checkbox"
-                                                                className="w-5 h-5 rounded-lg text-indigo-600 focus:ring-indigo-500"
-                                                                checked={col.quality_rules.not_null}
-                                                                onChange={e => handleUpdateRule(idx, 'quality', 'not_null', e.target.checked)}
-                                                            />
-                                                            <span className="text-sm font-semibold text-gray-700">Not Null</span>
-                                                        </label>
-                                                        <div>
-                                                            <label className="text-xs font-bold text-gray-400 mb-1 block ml-1">Format/Constraint</label>
-                                                            <input
-                                                                type="text"
-                                                                placeholder="e.g., numeric, email, regex"
-                                                                className="w-full p-3 bg-white border border-gray-100 rounded-2xl text-sm font-medium focus:border-indigo-600 outline-none"
-                                                                value={col.quality_rules.format}
-                                                                onChange={e => handleUpdateRule(idx, 'quality', 'format', e.target.value)}
-                                                            />
-                                                        </div>
-                                                    </div>
-
-                                                    {/* Business Rules */}
-                                                    <div className="space-y-2">
-                                                        <div className="flex justify-between items-center mb-2">
-                                                            <span className="text-[10px] font-black text-gray-400 uppercase tracking-[2px]">Business Rules</span>
-                                                            <button
-                                                                onClick={() => handleUpdateRule(idx, 'business', 'add', null)}
-                                                                className="p-1 text-indigo-600 hover:bg-indigo-50 rounded-lg transition-all"
-                                                            >
-                                                                <Plus size={16} />
-                                                            </button>
-                                                        </div>
-                                                        {col.business_rules.map((rule: string, rIdx: number) => (
-                                                            <div key={rIdx} className="flex gap-2">
-                                                                <input
-                                                                    type="text"
-                                                                    placeholder="Custom rule..."
-                                                                    className="flex-1 p-3 bg-white border border-gray-100 rounded-2xl text-sm font-medium focus:border-indigo-600 outline-none"
-                                                                    value={rule}
-                                                                    onChange={e => handleUpdateRule(idx, 'business', String(rIdx), e.target.value)}
-                                                                />
-                                                                <button
-                                                                    onClick={() => handleUpdateRule(idx, 'business', 'remove', String(rIdx))}
-                                                                    className="text-gray-300 hover:text-red-500 transition-colors"
-                                                                >
-                                                                    <Trash2 size={16} />
-                                                                </button>
-                                                            </div>
-                                                        ))}
-                                                        {col.business_rules.length === 0 && (
-                                                            <div className="text-center py-4 bg-white/50 border border-dashed border-gray-200 rounded-2xl text-xs text-gray-400 font-medium italic">
-                                                                No business rules defined
-                                                            </div>
-                                                        )}
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        ))}
-                                    </div>
-                                ) : (
-                                    <div className="flex flex-col items-center justify-center h-full text-center p-12">
-                                        <div className="w-20 h-20 bg-indigo-50 flex items-center justify-center rounded-3xl text-indigo-400 mb-6">
-                                            <Database size={40} />
-                                        </div>
-                                        <h3 className="text-xl font-bold text-gray-800">No Target Entity Configured</h3>
-                                        <p className="text-gray-500 mt-2 max-w-xs">Configure the target entity in the sidebar to populate columns.</p>
-                                    </div>
-                                )}
+                        {/* 3. Final YAML Preview */}
+                        <div className="glass-panel p-6 rounded-3xl shadow-xl flex flex-col flex-1 bg-slate-800 border-slate-700">
+                            <h2 className="text-xl font-bold text-white flex items-center gap-2 mb-4">
+                                <FileJson className="text-emerald-400" size={20} />
+                                Final Combined YAML
+                            </h2>
+                            <p className="text-xs text-slate-400 mb-2">This is the final configuration that will be used by the Mapper Service.</p>
+                            <div className="relative flex-1">
+                                <textarea
+                                    readOnly
+                                    className="w-full h-[300px] p-5 bg-slate-950 text-slate-300 font-mono text-xs rounded-2xl border border-slate-700 focus:outline-none custom-scrollbar"
+                                    value={finalYaml}
+                                />
+                                <div className="absolute top-4 right-4">
+                                    <span className="px-3 py-1 bg-slate-800 text-slate-400 text-[10px] font-bold uppercase tracking-widest rounded-lg border border-slate-700">
+                                        Read Only
+                                    </span>
+                                </div>
                             </div>
                         </div>
+
                     </div>
                 </div>
-            )
-            }
-        </div >
+            )}
+        </div>
     );
 }

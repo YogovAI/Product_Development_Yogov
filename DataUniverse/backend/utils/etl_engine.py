@@ -133,3 +133,63 @@ class ETLEngine:
                 raise
         
         return df
+
+    @staticmethod
+    def apply_template_config(df: pd.DataFrame, template_config: Dict[str, Any]) -> pd.DataFrame:
+        """
+        Apply TransformTemplate.config to a DataFrame.
+
+        Supported (initial):
+        - Column split: col.transform = { op: 'split', source_column, delimiter, outputs: [{name,index,cast}] }
+        - Type casting: col.data_type (basic) or col.constraints.pg_type == 'INTEGER'
+        - Not-null enforcement: col.quality_rules.not_null / col.constraints.not_null
+        """
+        cols = (template_config or {}).get("columns", [])
+        for col in cols:
+            transform = (col or {}).get("transform")
+            if transform and transform.get("op") == "split":
+                source_col = transform.get("source_column")
+                delim = transform.get("delimiter", "/")
+                outputs = transform.get("outputs", [])
+                if source_col and source_col in df.columns:
+                    parts = df[source_col].astype(str).str.split(delim, expand=True)
+                    for out in outputs:
+                        name = out.get("name")
+                        idx = out.get("index")
+                        cast = out.get("cast")
+                        if name is None or idx is None:
+                            continue
+                        df[name] = parts[idx]
+                        if cast == "int":
+                            df[name] = pd.to_numeric(df[name], errors="coerce").round().astype("Int64")
+                        elif cast == "float":
+                            df[name] = pd.to_numeric(df[name], errors="coerce")
+                continue
+
+            # Basic casting for declared integer-like columns
+            constraints = (col or {}).get("constraints", {})
+            pg_type = (constraints or {}).get("pg_type")
+            if pg_type in ["INTEGER", "BIGINT"]:
+                name = col.get("name")
+                if name and name in df.columns:
+                    # Safely convert to numeric, then to Int64 (nullable integer)
+                    # We use round() to avoid "non-equivalent" errors if there are small floating point errors
+                    numeric_series = pd.to_numeric(df[name], errors="coerce")
+                    df[name] = numeric_series.round().astype("Int64")
+
+        return df
+
+    @staticmethod
+    def apply_column_mappings(df: pd.DataFrame, mappings: List[Dict[str, str]]) -> pd.DataFrame:
+        """
+        Rename columns based on source-to-target mapping.
+        Format: [{'source': 'col_a', 'target': 'col_1'}, ...]
+        """
+        if not mappings:
+            return df
+        
+        rename_map = {str(m.get('source')): str(m.get('target')) for m in mappings if m.get('source') and m.get('target')}
+        # Filter map: only keep items where source col exists in df
+        actual_rename = {k: v for k, v in rename_map.items() if k in df.columns}
+        logger.info(f"Applying column renames: {actual_rename}")
+        return df.rename(columns=actual_rename)

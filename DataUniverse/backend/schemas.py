@@ -81,3 +81,36 @@ class ExtractorServiceResponse(ExtractorServiceBase):
 
     class Config:
         from_attributes = True
+
+class MapperServiceBase(BaseModel):
+    name: str
+    extractor_id: int
+    template_id: int
+    mapping_config: Dict[str, Any]
+
+class MapperServiceCreate(MapperServiceBase):
+    pass
+
+class MapperServiceResponse(MapperServiceBase):
+    id: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class LoaderServiceBase(BaseModel):
+    name: str
+    mapper_service_id: int
+    target_entity_name: Optional[str] = None
+    load_type: Optional[str] = "batch"
+    status: Optional[str] = "active"
+
+class LoaderServiceCreate(LoaderServiceBase):
+    pass
+
+class LoaderServiceResponse(LoaderServiceBase):
+    id: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True

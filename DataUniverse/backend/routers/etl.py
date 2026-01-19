@@ -12,6 +12,7 @@ import io
 import boto3
 from pathlib import Path
 from ..utils.etl_engine import ETLEngine
+from ..models import TransformTemplate
 
 router = APIRouter(prefix="/etl", tags=["etl"])
 logger = logging.getLogger(__name__)
@@ -118,27 +119,85 @@ async def execute_flat_file_to_db(
             config = ETLEngine.load_config(job.yaml_config)
             logger.info(f"Loaded YAML config for job {job.id}")
 
-        table_name = TableCreator._sanitize_table_name(file_name)
+        # Optional: Transform template via mapping_config
+        template = None
+        template_id = None
+        if isinstance(job.mapping_config, dict):
+            template_id = job.mapping_config.get("template_id")
+        if template_id:
+            t_res = await db.execute(select(TransformTemplate).filter(TransformTemplate.id == int(template_id)))
+            template = t_res.scalar_one_or_none()
+            if template:
+                logger.info(f"Using TransformTemplate {template.id} ({template.name}) for job {job.id}")
+
+        # Table name: template entity name (preferred) else filename
+        table_name = TableCreator._sanitize_table_name((template.target_entity_name if template else None) or file_name)
         first_chunk = True
         total_inserted = 0
         column_count = 0
         columns = []
+        table_created = False
 
         for df in chunks:
             if first_chunk:
-                # Infer schema from first chunk
-                schema = FileReader._infer_schema(df)
-                column_count = len(schema)
-                columns = list(schema.keys())
-                
-                # Create table
-                logger.info(f"Creating table: {table_name}")
-                await TableCreator.create_table(
-                    db=db,
-                    table_name=table_name,
-                    schema=schema,
-                    drop_if_exists=True
-                )
+                # If template provided, apply template-driven transforms on first chunk before schema inference
+                if template:
+                    df = ETLEngine.apply_template_config(df, template.config or {})
+
+                # Build schema:
+                # - Prefer template column schema when available
+                if template and isinstance(template.config, dict) and isinstance(template.config.get("columns"), list):
+                    schema = {}
+                    not_null = []
+                    primary_key = None
+                    include_auto_id = True
+                    for c in template.config.get("columns", []):
+                        name = (c or {}).get("name")
+                        if not name:
+                            continue
+                        constraints = (c or {}).get("constraints", {}) or {}
+                        pg_type = constraints.get("pg_type") or FileReader._infer_schema(df).get(name) or "TEXT"
+                        schema[name] = pg_type
+                        if constraints.get("not_null") or ((c or {}).get("quality_rules", {}) or {}).get("not_null"):
+                            not_null.append(name)
+                        if constraints.get("primary_key") or ((c or {}).get("quality_rules", {}) or {}).get("primary_key"):
+                            primary_key = name
+
+                    # Postgres-only: if business_id is declared PK, do not add auto id
+                    if primary_key and primary_key.lower() == "business_id":
+                        include_auto_id = False
+
+                    column_count = len(schema)
+                    columns = list(schema.keys())
+
+                    # Create table only if missing (do not drop)
+                    if not await TableCreator.table_exists(db, table_name):
+                        logger.info(f"Creating table (from template): {table_name}")
+                        await TableCreator.create_table(
+                            db=db,
+                            table_name=table_name,
+                            schema=schema,
+                            drop_if_exists=False,
+                            include_auto_id=include_auto_id,
+                            primary_key=primary_key,
+                            not_null=not_null
+                        )
+                        table_created = True
+                else:
+                    # Infer schema from first chunk
+                    schema = FileReader._infer_schema(df)
+                    column_count = len(schema)
+                    columns = list(schema.keys())
+
+                    # Create table (legacy behavior: drop and recreate)
+                    logger.info(f"Creating table: {table_name}")
+                    await TableCreator.create_table(
+                        db=db,
+                        table_name=table_name,
+                        schema=schema,
+                        drop_if_exists=True
+                    )
+                    table_created = True
                 first_chunk = False
             
             # Apply YAML transformations and DQ rules if config present
@@ -147,6 +206,10 @@ async def execute_flat_file_to_db(
                     df = ETLEngine.apply_quality_rules(df, config["data_quality"])
                 if "transformations" in config:
                     df = ETLEngine.apply_transformations(df, config["transformations"])
+
+            # Apply template on every chunk
+            if template:
+                df = ETLEngine.apply_template_config(df, template.config or {})
 
             # Insert this chunk
             data = df.to_dict('records')

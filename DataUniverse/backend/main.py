@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from .database import engine, Base
-from .routers import sources, etl, spark, rag, mapper, logs, transform, dask, cluster, extractors
+from .routers import sources, etl, spark, rag, mapper, logs, transform, dask, cluster, extractors, loaders
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -39,6 +39,7 @@ app.include_router(logs.router)
 app.include_router(transform.router)
 app.include_router(cluster.router)
 app.include_router(extractors.router)
+app.include_router(loaders.router)
 
 @app.get("/")
 def read_root():

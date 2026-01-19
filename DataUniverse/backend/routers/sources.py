@@ -169,11 +169,16 @@ async def get_columns(source_id: int, table_name: str, db: AsyncSession = Depend
             from sqlalchemy import text
             
             details = source.connection_details
-            user = details.get('user', 'postgres')
-            password = details.get('password', '')
-            host = details.get('host', 'localhost')
-            port = details.get('port', 5432)
-            dbname = details.get('dbname', 'postgres')
+            # Handle both UI field names and standard field names
+            user = details.get('user') or details.get('User Name', 'postgres')
+            password = details.get('password') or details.get('User Password', '')
+            host = details.get('host') or details.get('Host or IP Address', 'localhost')
+            port = details.get('port') or details.get('Port', 5432)
+            dbname = details.get('dbname') or details.get('DB Name or Service Name', 'postgres')
+            
+            # Ensure port is an integer
+            if isinstance(port, str):
+                port = int(port)
             
             url = f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{dbname}"
             

@@ -6,6 +6,7 @@ import Sources from './pages/Sources';
 import Spark from './pages/Spark';
 import RAG from './pages/RAG';
 import TransformTemplate from './pages/TransformTemplate';
+import TransformTemplateDetails from './pages/TransformTemplateDetails';
 import Dask from './pages/Dask';
 import DatabaseServices from './pages/DatabaseServices';
 import DatalakeServices from './pages/DatalakeServices';
@@ -39,6 +40,7 @@ function App() {
           </Route>
           <Route path="rag" element={<RAG />} />
           <Route path="transform" element={<TransformTemplate />} />
+          <Route path="transform/:id" element={<TransformTemplateDetails />} />
           <Route path="dask" element={<Dask />} />
         </Route>
       </Routes>

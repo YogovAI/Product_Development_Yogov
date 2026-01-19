@@ -62,7 +62,7 @@ class FileReader:
         Returns: dict of {column_name: postgres_type}
         """
         type_mapping = {
-            'int64': 'INTEGER',
+            'int64': 'BIGINT',
             'int32': 'INTEGER',
             'float64': 'DOUBLE PRECISION',
             'float32': 'REAL',

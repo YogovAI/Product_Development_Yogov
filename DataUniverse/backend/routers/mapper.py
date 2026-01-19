@@ -3,8 +3,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, text
 from typing import List, Dict, Any
 from ..database import get_db
-from ..models import DataSource, ETLJob
-from ..schemas import ETLJobCreate, ETLJobResponse
+from ..models import DataSource, ETLJob, MapperService
+from ..schemas import (
+    ETLJobCreate, 
+    ETLJobResponse, 
+    MapperServiceCreate, 
+    MapperServiceResponse
+)
 
 router = APIRouter(prefix="/mapper", tags=["mapper"])
 
@@ -24,41 +29,27 @@ async def get_source_schema(source_id: int, db: AsyncSession = Depends(get_db)):
     if not source:
         raise HTTPException(status_code=404, detail="Data source not found")
     
-    # For now, return mock schema based on source type
-    # In production, this would introspect actual database/file schemas
-    if source.source_type == "RDBMS" or source.source_type == "NO SQL":
-        # Mock database schema
-        return {
-            "source_id": source_id,
-            "source_name": source.name,
-            "fields": [
-                {"name": "id", "type": "integer"},
-                {"name": "name", "type": "string"},
-                {"name": "email", "type": "string"},
-                {"name": "created_at", "type": "timestamp"}
-            ]
-        }
-    elif source.source_type == "Flat Files":
-        # Mock file schema
-        return {
-            "source_id": source_id,
-            "source_name": source.name,
-            "fields": [
-                {"name": "column_1", "type": "string"},
-                {"name": "column_2", "type": "string"},
-                {"name": "column_3", "type": "number"}
-            ]
-        }
-    else:
-        # Generic schema
-        return {
-            "source_id": source_id,
-            "source_name": source.name,
-            "fields": [
-                {"name": "field_1", "type": "string"},
-                {"name": "field_2", "type": "string"}
-            ]
-        }
+    # Return empty fields by default, to be filled by the frontend from extractor/template
+    return {
+        "source_id": source_id,
+        "source_name": source.name,
+        "fields": []
+    }
+
+@router.post("/services", response_model=MapperServiceResponse)
+async def create_mapper_service(service: MapperServiceCreate, db: AsyncSession = Depends(get_db)):
+    """Create a new Mapper Service"""
+    new_svc = MapperService(**service.dict())
+    db.add(new_svc)
+    await db.commit()
+    await db.refresh(new_svc)
+    return new_svc
+
+@router.get("/services", response_model=List[MapperServiceResponse])
+async def list_mapper_services(db: AsyncSession = Depends(get_db)):
+    """List all registered Mapper Services"""
+    result = await db.execute(select(MapperService))
+    return result.scalars().all()
 
 @router.post("/mapping", response_model=ETLJobResponse)
 async def create_mapping(job: ETLJobCreate, db: AsyncSession = Depends(get_db)):

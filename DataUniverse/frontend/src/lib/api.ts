@@ -69,8 +69,27 @@ export const getSourceSchema = async (sourceId: number) => {
     return response.data;
 };
 
+export interface MapperService {
+    id: number;
+    name: string;
+    extractor_id: number;
+    template_id: number;
+    mapping_config: any;
+    created_at: string;
+}
+
 export const createMapping = async (mapping: any) => {
     const response = await api.post('/mapper/mapping', mapping);
+    return response.data;
+};
+
+export const createMapperService = async (service: any) => {
+    const response = await api.post<MapperService>('/mapper/services', service);
+    return response.data;
+};
+
+export const getMapperServices = async () => {
+    const response = await api.get<MapperService[]>('/mapper/services');
     return response.data;
 };
 
@@ -99,11 +118,28 @@ export interface TransformTemplate {
     target_entity_type?: string;
     target_entity_name?: string;
     config: {
+        business_rules?: {
+            english?: string;
+            json_source?: string;
+            final_yaml?: string;
+            yaml?: string; // legacy support
+        };
         columns: Array<{
             name: string;
             data_type: string;
             quality_rules: Record<string, any>;
             business_rules: string[];
+            constraints?: {
+                pg_type?: string; // e.g., INTEGER, TEXT, VARCHAR(255)
+                primary_key?: boolean;
+                not_null?: boolean;
+            };
+            transform?: {
+                op: 'split';
+                source_column: string;
+                delimiter?: string;
+                outputs: Array<{ name: string; index: number; cast?: 'int' | 'float' | 'string' }>;
+            };
         }>;
     };
     created_at: string;
@@ -134,6 +170,16 @@ export const getTransformTemplates = async () => {
 
 export const getTemplatesBySource = async (sourceId: number) => {
     const response = await api.get<TransformTemplate[]>(`/transform/templates/source/${sourceId}`);
+    return response.data;
+};
+
+export const getTransformTemplate = async (id: number) => {
+    const response = await api.get<TransformTemplate>(`/transform/templates/${id}`);
+    return response.data;
+};
+
+export const updateTransformTemplate = async (id: number, template: Omit<TransformTemplate, 'id' | 'created_at' | 'updated_at'>) => {
+    const response = await api.put<TransformTemplate>(`/transform/templates/${id}`, template);
     return response.data;
 };
 
@@ -180,6 +226,39 @@ export const analyzeSource = async (sourceId: number) => {
 
 export const deleteExtractorItem = async (id: number) => {
     await api.delete(`/extractors/${id}`);
+};
+
+export const generateBusinessRules = async (text: string) => {
+    const response = await api.post<any[]>('/transform/generate_rules', { text });
+    return response.data;
+};
+
+export interface LoaderService {
+    id: number;
+    name: string;
+    mapper_service_id: number;
+    load_type: string;
+    status: string;
+    created_at: string;
+}
+
+export const createLoaderService = async (loader: any) => {
+    const response = await api.post<LoaderService>('/loaders/', loader);
+    return response.data;
+};
+
+export const getLoaderServices = async () => {
+    const response = await api.get<LoaderService[]>('/loaders/');
+    return response.data;
+};
+
+export const deleteLoaderService = async (id: number) => {
+    await api.delete(`/loaders/${id}`);
+};
+
+export const executeLoaderService = async (id: number) => {
+    const response = await api.post(`/loaders/${id}/execute`);
+    return response.data;
 };
 
 export default api;

@@ -11,3 +11,4 @@ pyyaml
 dask[complete]
 distributed
 bokeh
+google-generativeai

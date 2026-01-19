@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import ReactFlow, {
     addEdge,
     Background,
@@ -12,23 +12,29 @@ import ReactFlow, {
     MarkerType
 } from 'reactflow';
 import 'reactflow/dist/style.css';
-import { Save, Play, Database, ArrowRight, Cloud } from 'lucide-react';
-import { getMapperSources, getSourceSchema, createMapping, getETLJobs, executeETLJob, getTemplatesBySource, type SourceSchema, type TransformTemplate } from '../lib/api';
+import { Database, ArrowRight, Zap, Info, Save, CheckCircle } from 'lucide-react';
+import {
+    getSourceSchema,
+    getExtractors,
+    getTransformTemplates,
+    createMapperService,
+    type SourceSchema,
+    type TransformTemplate,
+    type ExtractorService
+} from '../lib/api';
 import LoadingOverlay from '../components/LoadingOverlay';
-import SuccessPopup from '../components/SuccessPopup';
-import LogViewer, { type LogEntry } from '../components/LogViewer';
 
-// Custom Field Node
+// Custom Field Node for Mapping Visualization
 const FieldNode = ({ data }: { data: { label: string, type: 'source' | 'target', fieldType: string } }) => {
     return (
-        <div className={`px-4 py-3 shadow-lg rounded-xl bg-white border-2 ${data.type === 'source' ? 'border-blue-500' : 'border-green-500'} min-w-[180px] hover:shadow-xl transition-all`}>
+        <div className={`px-5 py-4 shadow-xl rounded-2xl bg-white border-2 ${data.type === 'source' ? 'border-indigo-500 shadow-indigo-100' : 'border-emerald-500 shadow-emerald-100'} min-w-[200px] hover:scale-105 transition-all duration-300`}>
             <div className="flex items-center justify-between">
-                {data.type === 'target' && <Handle type="target" position={Position.Left} className="w-3 h-3 bg-green-500" />}
+                {data.type === 'target' && <Handle type="target" position={Position.Left} className="w-3 h-3 bg-emerald-500 border-2 border-white" />}
                 <div className="flex-1">
-                    <span className="font-semibold text-sm text-gray-800">{data.label}</span>
-                    <span className="block text-xs text-gray-500 mt-1">{data.fieldType}</span>
+                    <span className="font-bold text-[14px] text-slate-800 tracking-tight">{data.label}</span>
+                    <span className="block text-[11px] font-black uppercase text-slate-400 mt-1.5 tracking-widest">{data.fieldType}</span>
                 </div>
-                {data.type === 'source' && <Handle type="source" position={Position.Right} className="w-3 h-3 bg-blue-500" />}
+                {data.type === 'source' && <Handle type="source" position={Position.Right} className="w-3 h-3 bg-indigo-500 border-2 border-white" />}
             </div>
         </div>
     );
@@ -41,171 +47,119 @@ const nodeTypes = {
 export default function DataMapper() {
     const [nodes, setNodes, onNodesChange] = useNodesState([]);
     const [edges, setEdges, onEdgesChange] = useEdgesState([]);
-    const [jobName, setJobName] = useState('');
-    const [sources, setSources] = useState<any[]>([]);
-    const [sourceId, setSourceId] = useState<number | null>(null);
-    const [targetId, setTargetId] = useState<number | null>(null);
+
+    // Dropdown Data
+    const [extractorServices, setExtractorServices] = useState<ExtractorService[]>([]);
+    const [templates, setTemplates] = useState<TransformTemplate[]>([]);
+
+    // Selection States
+    const [mapperServiceName, setMapperServiceName] = useState('');
+    const [selectedExtractorId, setSelectedExtractorId] = useState<number | null>(null);
+    const [selectedTemplateId, setSelectedTemplateId] = useState<number | null>(null);
+
+    // Schema States
     const [sourceSchema, setSourceSchema] = useState<SourceSchema | null>(null);
     const [targetSchema, setTargetSchema] = useState<SourceSchema | null>(null);
-    const [targetIsDatalake, setTargetIsDatalake] = useState(false);
-    const [existingJobs, setExistingJobs] = useState<any[]>([]);
-    const [selectedJobId, setSelectedJobId] = useState<number | null>(null);
+
+    // UI Helpers
     const [isLoading, setIsLoading] = useState(false);
     const [loadingMessage, setLoadingMessage] = useState('');
     const [showSuccess, setShowSuccess] = useState(false);
-    const [successData, setSuccessData] = useState<any>(null);
-    const [logs, setLogs] = useState<LogEntry[]>([]);
-    const [showLogs, setShowLogs] = useState(false);
-    const [availableTemplates, setAvailableTemplates] = useState<TransformTemplate[]>([]);
-    const [selectedTemplateId, setSelectedTemplateId] = useState<number | null>(null);
-    const [selectedEngine, setSelectedEngine] = useState<'pandas' | 'spark' | 'dask' | 'seatunnel'>('pandas');
-    const eventSourceRef = useRef<EventSource | null>(null);
 
+    // Fetch All Dropdown Data on Mount
     useEffect(() => {
-        loadSources();
-        loadExistingJobs();
-        return () => {
-            if (eventSourceRef.current) {
-                eventSourceRef.current.close();
+        const loadInitialData = async () => {
+            setIsLoading(true);
+            setLoadingMessage('Fetching Configuration...');
+            try {
+                const [eServices, allTemplates] = await Promise.all([
+                    getExtractors(),
+                    getTransformTemplates()
+                ]);
+                setExtractorServices(eServices || []);
+                setTemplates(allTemplates || []);
+            } catch (error) {
+                console.error("Failed to load initial data", error);
+            } finally {
+                setIsLoading(false);
             }
         };
+        loadInitialData();
     }, []);
 
-    const addLog = useCallback((message: string, level: LogEntry['level'] = 'info', source: LogEntry['source'] = 'frontend') => {
-        setLogs(prev => [...prev.slice(-99), {
-            message,
-            level,
-            source,
-            timestamp: new Date().toLocaleTimeString()
-        }]);
-    }, []);
+    // Handle Extractor Selection -> Load Physical Source Schema
+    const handleExtractorChange = async (id: number) => {
+        const extractorId = Number(id);
+        setSelectedExtractorId(extractorId);
+        const extractor = extractorServices.find(e => e.id === extractorId);
 
-    const startLogCapture = useCallback(() => {
-        setShowLogs(true);
-        // Backend logs
-        if (eventSourceRef.current) eventSourceRef.current.close();
-        eventSourceRef.current = new EventSource('http://localhost:8002/logs/stream');
-
-        eventSourceRef.current.onmessage = (event: MessageEvent) => {
-            const message = event.data;
-            let level: LogEntry['level'] = 'info';
-            if (message.toLowerCase().includes('error')) level = 'error';
-            if (message.toLowerCase().includes('success') || message.toLowerCase().includes('completed')) level = 'success';
-            if (message.toLowerCase().includes('warning')) level = 'warn';
-            addLog(message, level, 'backend');
-        };
-
-        eventSourceRef.current.onerror = () => {
-            addLog("Lost connection to backend logs", "error", "backend");
-            if (eventSourceRef.current) eventSourceRef.current.close();
-        };
-
-        // Frontend logs interception
-        const originalLog = console.log;
-        const originalInfo = console.info;
-        const originalWarn = console.warn;
-        const originalError = console.error;
-
-        console.log = (...args) => {
-            addLog(args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '), 'info', 'frontend');
-            originalLog(...args);
-        };
-        console.info = (...args) => {
-            addLog(args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '), 'info', 'frontend');
-            originalInfo(...args);
-        };
-        console.warn = (...args) => {
-            addLog(args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '), 'warn', 'frontend');
-            originalWarn(...args);
-        };
-        console.error = (...args) => {
-            addLog(args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '), 'error', 'frontend');
-            originalError(...args);
-        };
-
-        return () => {
-            console.log = originalLog;
-            console.info = originalInfo;
-            console.warn = originalWarn;
-            console.error = originalError;
-        };
-    }, [addLog]);
-
-    const loadSources = async () => {
-        try {
-            const data = await getMapperSources();
-            setSources(data);
-        } catch (error) {
-            console.error("Failed to load sources", error);
+        if (!extractor) {
+            setSourceSchema(null);
+            return;
         }
-    };
 
-    const loadExistingJobs = async () => {
-        try {
-            const jobs = await getETLJobs();
-            setExistingJobs(jobs);
-        } catch (error) {
-            console.error("Failed to load jobs", error);
-        }
-    };
+        // Use schema_info from the extractor if available
+        if (extractor.schema_info) {
+            let fields = [];
+            try {
+                const info = typeof extractor.schema_info === 'string'
+                    ? JSON.parse(extractor.schema_info)
+                    : extractor.schema_info;
 
-    const loadSourceSchema = async (id: number, isSource: boolean) => {
-        try {
-            const schema = await getSourceSchema(id);
-            if (isSource) {
-                setSourceSchema(schema);
-                setSourceId(id);
-                // Load templates for this source
-                const templates = await getTemplatesBySource(id);
-                setAvailableTemplates(templates);
-                setSelectedTemplateId(null);
-            } else {
-                setTargetSchema(schema);
-                setTargetId(id);
+                fields = info.fields || info.schema || [];
+                // If the info is just the array itself
+                if (Array.isArray(info)) fields = info;
+            } catch (e) {
+                console.error("Failed to parse extractor schema_info", e);
             }
+
+            if (fields.length > 0) {
+                setSourceSchema({
+                    source_id: extractor.source_id,
+                    source_name: extractor.name,
+                    fields: fields
+                });
+                return;
+            }
+        }
+
+        try {
+            setIsLoading(true);
+            setLoadingMessage('Introspecting Extractor Schema...');
+            const schema = await getSourceSchema(extractor.source_id);
+            setSourceSchema(schema);
         } catch (error) {
             console.error("Failed to load schema", error);
+            setSourceSchema(null);
+        } finally {
+            setIsLoading(false);
         }
     };
 
-    const handleTemplateSelect = (id: number) => {
-        setSelectedTemplateId(id);
-        const template = availableTemplates.find(t => t.id === id);
-        if (template && sourceSchema) {
-            // Highlight or update nodes based on template rules if needed
-            // For now, we'll just store the selection
-            console.log("Applying template rules to mapper:", template);
+    // Handle Template Selection -> Derive Target Schema from Template JSON fields
+    const handleTemplateChange = (id: number) => {
+        const templateId = Number(id);
+        setSelectedTemplateId(templateId);
+        const template = templates.find(t => t.id === templateId);
+
+        if (!template || !template.config || !template.config.columns) {
+            console.warn("Template missing configuration or columns", template);
+            setTargetSchema(null);
+            return;
         }
+
+        const derivedTargetSchema: SourceSchema = {
+            source_id: -1,
+            source_name: template.name,
+            fields: template.config.columns.map(col => ({
+                name: col.name,
+                type: col.data_type || 'string'
+            }))
+        };
+        setTargetSchema(derivedTargetSchema);
     };
 
-    const handleTargetSelect = async (id: number) => {
-        const target = sources.find(s => s.id === id);
-        setTargetIsDatalake(target?.source_type === 'Datalake/Lakehouse');
-        loadSourceSchema(id, false);
-    };
-
-    useEffect(() => {
-        if (sourceSchema && targetSchema) {
-            // Create nodes from schemas
-            const sourceNodes: Node[] = sourceSchema.fields.map((field, idx) => ({
-                id: `s-${idx}`,
-                type: 'field',
-                position: { x: 50, y: 50 + idx * 80 },
-                data: { label: field.name, type: 'source', fieldType: field.type }
-            }));
-
-            const targetNodes: Node[] = targetSchema.fields.map((field, idx) => ({
-                id: `t-${idx}`,
-                type: 'field',
-                position: { x: 600, y: 50 + idx * 80 },
-                data: { label: field.name, type: 'target', fieldType: field.type }
-            }));
-
-            setNodes([...sourceNodes, ...targetNodes]);
-            setEdges([]);
-        }
-    }, [sourceSchema, targetSchema, setNodes, setEdges]);
-
+    // Flow Connection Handler
     const onConnect = useCallback(
         (params: Connection) => setEdges((eds) => addEdge({
             ...params,
@@ -216,197 +170,186 @@ export default function DataMapper() {
         [setEdges],
     );
 
-    const handleSaveJob = async () => {
-        if (!sourceId || !targetId) {
-            alert("Please select both source and target schemas");
+    // Sync Nodes Array with State Changes
+    useEffect(() => {
+        const newNodes: Node[] = [];
+
+        if (sourceSchema) {
+            const sourceNodes: Node[] = sourceSchema.fields.map((field, idx) => ({
+                id: `s-${field.name}`,
+                type: 'field',
+                position: { x: 50, y: 50 + idx * 100 },
+                data: { label: field.name, type: 'source', fieldType: field.type }
+            }));
+            newNodes.push(...sourceNodes);
+        }
+
+        if (targetSchema) {
+            const targetNodes: Node[] = targetSchema.fields.map((field, idx) => ({
+                id: `t-${field.name}`,
+                type: 'field',
+                position: { x: 700, y: 50 + idx * 100 },
+                data: { label: field.name, type: 'target', fieldType: field.type }
+            }));
+            newNodes.push(...targetNodes);
+        }
+
+        setNodes(newNodes);
+        setEdges([]); // Reset mappings when input/output definitions change
+    }, [sourceSchema, targetSchema, setNodes, setEdges]);
+
+    // Save Mapper Service to Postgres DB
+    const handleSaveMapperService = async () => {
+        if (!mapperServiceName) {
+            alert("Please enter a Mapper Service Name");
+            return;
+        }
+        if (!selectedExtractorId || !selectedTemplateId) {
+            alert("Please select both an Extractor Service and a Transformer Template");
             return;
         }
 
-        const mapping = targetIsDatalake ? [] : edges.map(edge => ({
+        const extractor = extractorServices.find(e => e.id === selectedExtractorId);
+        const template = templates.find(t => t.id === selectedTemplateId);
+
+        if (!extractor || !template) return;
+
+        // Prepare the mapping config from edges
+        const columnMappings = edges.map(edge => ({
             source: nodes.find(n => n.id === edge.source)?.data.label,
             target: nodes.find(n => n.id === edge.target)?.data.label,
         }));
 
         try {
-            const result = await createMapping({
-                name: jobName || 'Untitled Mapping',
-                source_id: sourceId,
-                target_id: targetId,
-                mapping_config: { mappings: mapping }
-            });
-            alert(`Job "${jobName || 'Untitled'}" saved successfully!`);
-            setSelectedJobId(result.id);
-            loadExistingJobs();
-        } catch (error) {
-            alert("Failed to save job: " + error);
-        }
-    };
-
-    const handleRunJob = async () => {
-        if (!selectedJobId) {
-            alert("Please save the job first or select an existing job");
-            return;
-        }
-
-        try {
             setIsLoading(true);
-            setLoadingMessage('Executing ETL Job...');
+            setLoadingMessage('Saving Mapper Service...');
 
-            const stopCapture = startLogCapture();
-            console.log("Starting ETL process...");
+            await createMapperService({
+                name: mapperServiceName,
+                extractor_id: extractor.id,
+                template_id: template.id,
+                mapping_config: {
+                    mappings: columnMappings
+                }
+            });
 
-            const result = await executeETLJob(selectedJobId);
-
-            console.log("ETL Job execution finished successfully.");
-            stopCapture();
-            setIsLoading(false);
-            setSuccessData(result);
             setShowSuccess(true);
-        } catch (error: any) {
-            console.error(`ETL Job failed: ${error.message}`);
+            setTimeout(() => setShowSuccess(false), 3000);
+        } catch (error) {
+            console.error("Failed to save mapper service", error);
+            alert("Failed to save Mapper Service. Ensure all requirements are met.");
+        } finally {
             setIsLoading(false);
-            alert("Failed to execute job: " + (error.response?.data?.detail || error.message));
         }
     };
 
     return (
-        <div className="flex flex-col h-[calc(100vh-8rem)] space-y-6 p-6 animate-fade-in">
-            {isLoading && <LoadingOverlay message={loadingMessage} progress="Processing data..." />}
-            {showSuccess && successData && (
-                <SuccessPopup
-                    tableName={successData.table_name}
-                    rowsInserted={successData.rows_inserted}
-                    columns={successData.columns}
-                    onClose={() => setShowSuccess(false)}
-                />
-            )}
+        <div className="flex flex-col h-[calc(100vh-10rem)] space-y-8 animate-fade-in">
+            {isLoading && <LoadingOverlay message={loadingMessage} progress="Working..." />}
 
-            <div className="glass-panel p-6 rounded-2xl shadow-lg">
-                <div className="flex justify-between items-center mb-6">
+            {/* Control Panel */}
+            <div className="bg-white p-8 rounded-[2.5rem] shadow-2xl shadow-indigo-500/5 border border-slate-100">
+                <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6 mb-8">
                     <div>
-                        <h1 className="text-4xl font-bold text-gradient mb-2">Data Mapper</h1>
-                        <p className="text-gray-600">Map fields between source and target schemas</p>
+                        <h1 className="text-4xl font-black text-slate-900 tracking-tight flex items-center gap-4">
+                            Mapper Services
+                            <div className="bg-indigo-500/10 p-2 rounded-xl">
+                                <Zap className="text-indigo-600" size={24} />
+                            </div>
+                        </h1>
+                        <p className="text-slate-500 font-medium mt-2">Connect Extractor columns to Transformer target columns</p>
                     </div>
-                    <div className="flex gap-3">
+                    <div className="flex gap-4">
                         <button
-                            onClick={handleSaveJob}
-                            className="flex items-center gap-2 px-5 py-3 border-2 border-gray-200 text-gray-700 rounded-xl hover:bg-gray-50 font-semibold transition-all"
+                            onClick={handleSaveMapperService}
+                            className="btn-gradient flex items-center gap-2 px-8 py-4 text-white rounded-2xl shadow-lg shadow-indigo-500/20 font-black uppercase tracking-widest text-sm hover:scale-105 active:scale-95 transition-all"
                         >
-                            <Save size={18} /> Save Job
-                        </button>
-                        <button
-                            onClick={handleRunJob}
-                            disabled={!selectedJobId}
-                            className={`btn-gradient flex items-center gap-2 px-5 py-3 text-white rounded-xl shadow-lg font-semibold ${!selectedJobId ? 'opacity-50 cursor-not-allowed' : ''}`}
-                        >
-                            <Play size={18} /> Run Job
+                            <Save size={18} /> Save Mapper Service
                         </button>
                     </div>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-6 gap-4">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+                    {/* Mapper Service Name - Free Text Box */}
+                    <div className="group">
+                        <label className="flex items-center gap-2 text-xs font-black uppercase text-slate-400 mb-2.5 tracking-[0.15em] ml-1">
+                            <Info size={14} /> Mapper Service Name
+                        </label>
+                        <input
+                            type="text"
+                            placeholder="Enter Service Name (e.g. SalesDataMapper)"
+                            className="w-full p-4 bg-slate-50 border-2 border-transparent rounded-[1.25rem] focus:bg-white focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 transition-all font-bold text-slate-700 shadow-sm"
+                            value={mapperServiceName}
+                            onChange={(e) => setMapperServiceName(e.target.value)}
+                        />
+                    </div>
+
+                    {/* Extractor Service Selector */}
                     <div>
-                        <label className="block text-sm font-semibold mb-2 text-gray-700">Mapping Job</label>
+                        <label className="flex items-center gap-2 text-xs font-black uppercase text-slate-400 mb-2.5 tracking-[0.15em] ml-1">
+                            <Database size={14} /> Extractor Service
+                        </label>
                         <select
-                            className="w-full p-3 border-2 border-gray-200 rounded-xl focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 transition-all bg-white"
-                            value={selectedJobId || ''}
-                            onChange={(e) => {
-                                const jobId = Number(e.target.value);
-                                setSelectedJobId(jobId);
-                                const job = existingJobs.find(j => j.id === jobId);
-                                if (job) {
-                                    setJobName(job.name);
-                                    setSourceId(job.source_id);
-                                    setTargetId(job.target_id);
-                                    const target = sources.find(s => s.id === job.target_id);
-                                    setTargetIsDatalake(target?.source_type === 'Datalake/Lakehouse');
-                                    loadSourceSchema(job.source_id, true);
-                                    loadSourceSchema(job.target_id, false);
-                                }
-                            }}
+                            className="w-full p-4 bg-slate-50 border-2 border-transparent rounded-[1.25rem] focus:bg-white focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 transition-all font-bold text-slate-700 appearance-none shadow-sm cursor-pointer"
+                            value={selectedExtractorId || ''}
+                            onChange={(e) => handleExtractorChange(Number(e.target.value))}
                         >
-                            <option value="">New Mapping</option>
-                            {existingJobs.map(job => (
-                                <option key={job.id} value={job.id}>{job.name}</option>
+                            <option value="">Select Extractor</option>
+                            {extractorServices.map(svc => (
+                                <option key={svc.id} value={svc.id}>{svc.name}</option>
                             ))}
                         </select>
                     </div>
+
+                    {/* Transformer Template Selector */}
                     <div>
-                        <label className="block text-sm font-semibold mb-2 text-gray-700">Execution Engine</label>
+                        <label className="flex items-center gap-2 text-xs font-black uppercase text-slate-400 mb-2.5 tracking-[0.15em] ml-1">
+                            <Zap size={14} /> Transformer Template
+                        </label>
                         <select
-                            className="w-full p-3 border-2 border-gray-200 rounded-xl focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 transition-all bg-white"
-                            value={selectedEngine}
-                            onChange={(e: any) => setSelectedEngine(e.target.value)}
-                        >
-                            <option value="pandas">Pandas (Local)</option>
-                            <option value="spark">Apache Spark</option>
-                            <option value="dask">Dask Cluster</option>
-                            <option value="seatunnel">Apache SeaTunnel</option>
-                        </select>
-                    </div>
-                    <div>
-                        <label className="block text-sm font-semibold mb-2 text-gray-700">Source</label>
-                        <select
-                            className="w-full p-3 border-2 border-gray-200 rounded-xl focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 transition-all bg-white"
-                            value={sourceId || ''}
-                            onChange={(e) => loadSourceSchema(Number(e.target.value), true)}
-                        >
-                            <option value="">Select Source</option>
-                            {sources.map(src => (
-                                <option key={src.id} value={src.id}>{src.name} ({src.source_type || src.type})</option>
-                            ))}
-                        </select>
-                    </div>
-                    <div>
-                        <label className="block text-sm font-semibold mb-2 text-gray-700">Apply Template</label>
-                        <select
-                            className="w-full p-3 border-2 border-gray-200 rounded-xl focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 transition-all bg-white"
+                            className="w-full p-4 bg-slate-50 border-2 border-transparent rounded-[1.25rem] focus:bg-white focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 transition-all font-bold text-slate-700 appearance-none shadow-sm cursor-pointer"
                             value={selectedTemplateId || ''}
-                            disabled={!sourceId || availableTemplates.length === 0}
-                            onChange={(e) => handleTemplateSelect(Number(e.target.value))}
+                            onChange={(e) => handleTemplateChange(Number(e.target.value))}
+                            disabled={!selectedExtractorId}
                         >
-                            <option value="">{availableTemplates.length > 0 ? 'Select Template' : 'No Templates'}</option>
-                            {availableTemplates.map(t => (
+                            <option value="">Apply Schema Template</option>
+                            {templates.map(t => (
                                 <option key={t.id} value={t.id}>{t.name}</option>
                             ))}
                         </select>
                     </div>
-                    <div>
-                        <label className="block text-sm font-semibold mb-2 text-gray-700">Target</label>
-                        <select
-                            className="w-full p-3 border-2 border-gray-200 rounded-xl focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 transition-all bg-white"
-                            value={targetId || ''}
-                            onChange={(e) => handleTargetSelect(Number(e.target.value))}
-                        >
-                            <option value="">Select Target</option>
-                            {sources.map(src => (
-                                <option key={src.id} value={src.id}>{src.name} ({src.source_type || src.type})</option>
-                            ))}
-                        </select>
-                    </div>
-                    <div>
-                        <label className="block text-sm font-semibold mb-2 text-gray-700">Job Name</label>
-                        <input
-                            type="text"
-                            placeholder="Enter job name"
-                            className="w-full p-3 border-2 border-gray-200 rounded-xl focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 transition-all"
-                            value={jobName}
-                            onChange={(e) => setJobName(e.target.value)}
-                        />
-                    </div>
                 </div>
             </div>
 
-            <div className="flex-1 glass-panel rounded-2xl shadow-lg overflow-hidden relative">
-                {sourceSchema && targetSchema ? (
+            {/* Mapping Workspace */}
+            <div className="flex-1 bg-white rounded-[2.5rem] shadow-2xl shadow-indigo-500/5 border border-slate-100 overflow-hidden relative min-h-[500px]">
+                {showSuccess && (
+                    <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 bg-white p-8 rounded-[3rem] shadow-2xl border border-emerald-100 flex flex-col items-center gap-4 animate-bounce">
+                        <CheckCircle className="text-emerald-500" size={64} />
+                        <h2 className="text-2xl font-black text-slate-800">Mapper Service Saved!</h2>
+                    </div>
+                )}
+
+                {(sourceSchema || targetSchema) ? (
                     <>
-                        <div className="absolute top-6 left-6 z-10 glass-panel p-3 rounded-xl shadow-md text-sm font-semibold text-indigo-700 flex items-center gap-2">
-                            <Database size={16} />
-                            Source: {sourceSchema.source_name}
+                        <div className="absolute top-10 left-10 z-10 bg-white/80 backdrop-blur-xl p-4 px-6 rounded-2xl shadow-xl border border-indigo-100 flex items-center gap-3">
+                            <div className="w-8 h-8 rounded-lg bg-indigo-500/10 flex items-center justify-center">
+                                <Database size={16} className="text-indigo-600" />
+                            </div>
+                            <div>
+                                <span className="block text-[10px] uppercase font-black tracking-widest text-slate-400 leading-none mb-1">Source Schema (Extractor)</span>
+                                <span className="text-sm font-bold text-slate-800">{sourceSchema?.source_name || "N/A"}</span>
+                            </div>
                         </div>
-                        <div className="absolute top-6 right-6 z-10 glass-panel p-3 rounded-xl shadow-md text-sm font-semibold text-green-700 flex items-center gap-2">
-                            <Database size={16} />
-                            Target: {targetSchema.source_name}
+
+                        <div className="absolute top-10 right-10 z-10 bg-white/80 backdrop-blur-xl p-4 px-6 rounded-2xl shadow-xl border border-emerald-100 flex items-center gap-3">
+                            <div className="w-8 h-8 rounded-lg bg-emerald-500/10 flex items-center justify-center text-emerald-600 font-bold text-xs">
+                                <Zap size={16} />
+                            </div>
+                            <div>
+                                <span className="block text-[10px] uppercase font-black tracking-widest text-slate-400 leading-none mb-1">Target Schema (Template)</span>
+                                <span className="text-sm font-bold text-slate-800">{targetSchema?.source_name || "N/A"}</span>
+                            </div>
                         </div>
 
                         <ReactFlow
@@ -417,46 +360,27 @@ export default function DataMapper() {
                             onConnect={onConnect}
                             nodeTypes={nodeTypes}
                             fitView
+                            fitViewOptions={{ padding: 0.2 }}
                         >
-                            <Background color="#e0e7ff" gap={16} />
-                            <Controls />
+                            <Background color="#f1f5f9" gap={20} size={1} />
+                            <Controls className="bg-white border-none shadow-xl rounded-xl overflow-hidden" />
                         </ReactFlow>
-                        {targetIsDatalake && (
-                            <div className="absolute inset-0 bg-white/60 backdrop-blur-sm flex items-center justify-center z-20">
-                                <div className="glass-panel p-8 rounded-2xl shadow-2xl text-center max-w-md">
-                                    <Cloud className="mx-auto mb-4 text-indigo-500" size={48} />
-                                    <h3 className="text-xl font-bold text-gray-800 mb-2">Datalake Target Selected</h3>
-                                    <p className="text-gray-600">
-                                        Data will be persisted directly to the Datalake location. Schema mapping is skipped for direct object storage.
-                                    </p>
-                                    <div className="mt-6 p-3 bg-indigo-50 rounded-xl text-sm font-medium text-indigo-700">
-                                        Click "Run Job" to start the transfer
-                                    </div>
-                                </div>
-                            </div>
-                        )}
                     </>
                 ) : (
-                    <div className="flex items-center justify-center h-full">
-                        <div className="text-center">
-                            <ArrowRight className="mx-auto mb-4 text-gray-300" size={64} />
-                            <p className="text-lg font-medium text-gray-500">Select source and target schemas to begin mapping</p>
-                            <p className="text-sm text-gray-400 mt-2">Choose from the dropdowns above</p>
+                    <div className="flex items-center justify-center h-full bg-slate-50/50">
+                        <div className="text-center max-w-sm px-8">
+                            <div className="w-20 h-20 bg-white rounded-3xl shadow-xl flex items-center justify-center mx-auto mb-8 border border-slate-100">
+                                <ArrowRight className="text-slate-300" size={40} />
+                            </div>
+                            <h3 className="text-xl font-bold text-slate-800 mb-3">Workspace Empty</h3>
+                            <p className="text-sm font-medium text-slate-400 leading-relaxed">
+                                {!selectedExtractorId ? "Select an Extractor Service to load source columns." :
+                                    "Select a Transformer Template to define your target columns."}
+                            </p>
                         </div>
                     </div>
                 )}
             </div>
-
-            {showLogs && (
-                <LogViewer
-                    logs={logs}
-                    onClose={() => {
-                        setShowLogs(false);
-                        if (eventSourceRef.current) eventSourceRef.current.close();
-                    }}
-                    onClear={() => setLogs([])}
-                />
-            )}
         </div>
     );
 }
