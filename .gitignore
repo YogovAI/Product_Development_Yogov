@@ -5,5 +5,8 @@
 !DataUniverse/
 !DataUniverse/**
 
+# But ignore .env file only inside DataUniverse
+DataUniverse/.env
+
 # allow gitignore itself
 !.gitignore
