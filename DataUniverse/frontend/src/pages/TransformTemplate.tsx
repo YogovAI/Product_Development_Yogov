@@ -8,9 +8,9 @@ import {
     Database,
     ArrowRight,
     ChevronDown,
-    Wand2,
-    FileJson,
-    Save
+    Save,
+    X,
+    Edit3
 } from 'lucide-react';
 import yaml from 'js-yaml';
 import {
@@ -28,6 +28,34 @@ import {
     type ExtractorService,
     generateBusinessRules
 } from '../lib/api';
+
+const Modal = ({ title, isOpen, onClose, children, actions }: any) => {
+    if (!isOpen) return null;
+    return (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
+            <div className="bg-white rounded-[2rem] shadow-2xl w-full max-w-6xl max-h-[90vh] flex flex-col overflow-hidden border border-white/20 animate-in zoom-in-95 duration-200">
+                <div className="px-8 py-6 border-b border-gray-100 flex justify-between items-center bg-gray-50">
+                    <h3 className="text-2xl font-black text-slate-800 tracking-tight">{title}</h3>
+                    <button onClick={onClose} className="p-2 hover:bg-gray-200 rounded-full transition-colors text-slate-400">
+                        <X size={24} />
+                    </button>
+                </div>
+                <div className="flex-1 overflow-y-auto p-8 bg-[#f8fafc]">
+                    {children}
+                </div>
+                <div className="px-8 py-6 border-t border-gray-100 flex justify-end gap-3 bg-gray-50">
+                    <button
+                        onClick={onClose}
+                        className="px-6 py-3 bg-white border-2 border-slate-200 text-slate-600 font-bold rounded-2xl hover:bg-slate-50 transition-all flex items-center gap-2"
+                    >
+                        <X size={18} /> Close
+                    </button>
+                    {actions}
+                </div>
+            </div>
+        </div>
+    );
+};
 
 export default function TransformTemplatePage() {
     const navigate = useNavigate();
@@ -48,14 +76,16 @@ export default function TransformTemplatePage() {
     const [isSaving, setIsSaving] = useState(false);
     const [activeTab, setActiveTab] = useState<'create' | 'list'>('list');
     const [editingTemplateId, setEditingTemplateId] = useState<number | null>(null);
-    const [businessRulesEnglish, setBusinessRulesEnglish] = useState('');
 
     // New State for Advanced Configuration
-    const [schemaJsonString, setSchemaJsonString] = useState('{\n  "columns": []\n}');
-    const [businessRulesJsonString, setBusinessRulesJsonString] = useState('[\n\n]');
+    // New State for Unified Config
+    const [unifiedConfigJsonString, setUnifiedConfigJsonString] = useState('{\n  "columns": []\n}');
     const [finalYaml, setFinalYaml] = useState('');
+    const [newRuleType, setNewRuleType] = useState('');
+    const [newRuleParams, setNewRuleParams] = useState<any>({});
+    const [dataLoadStrategy, setDataLoadStrategy] = useState<string>('Full Load');
+    const [isUnifiedModalOpen, setIsUnifiedModalOpen] = useState(false);
     const [isGeneratingRules, setIsGeneratingRules] = useState(false);
-    const [lastSavedSchema, setLastSavedSchema] = useState<any>(null);
 
     useEffect(() => {
         loadData();
@@ -73,8 +103,7 @@ export default function TransformTemplatePage() {
             setTargetLoadType(editTemplate.target_entity_type || '');
             setTargetEntityName(editTemplate.target_entity_name || '');
             setColumns(editTemplate.config?.columns || []);
-            setBusinessRulesEnglish(editTemplate.config?.business_rules?.english || '');
-            setBusinessRulesJsonString(editTemplate.config?.business_rules?.json_source || '[\n\n]');
+            setDataLoadStrategy(editTemplate.config?.load_strategy || 'Full Load');
             setFinalYaml(editTemplate.config?.business_rules?.final_yaml || '');
 
             // Auto-hydrate columns when editing existing template if missing
@@ -101,35 +130,18 @@ export default function TransformTemplatePage() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [location?.state]);
 
-    // Live JSON schema preview from current columns - updates the editable text area
+    // Live Unified Config Sync
     useEffect(() => {
         const schema = buildSchemaFromColumns(columns);
-        setSchemaJsonString(JSON.stringify(schema, null, 2));
-    }, [columns]);
+        const json = JSON.stringify(schema, null, 2);
+        setUnifiedConfigJsonString(json);
 
-    // Update Final YAML when Schema or Rules change
-    useEffect(() => {
         try {
-            const schemaObj = JSON.parse(schemaJsonString);
-            let rulesObj = [];
-            try {
-                rulesObj = JSON.parse(businessRulesJsonString);
-            } catch (e) {
-                // If rules are invalid JSON, just use empty array or ignore for now
-                console.warn("Invalid rules JSON");
-            }
-
-            const unified = {
-                ...schemaObj,
-                business_rules: rulesObj
-            };
-
-            const yamlStr = yaml.dump(unified);
-            setFinalYaml(yamlStr);
+            setFinalYaml(yaml.dump(schema));
         } catch (e) {
-            console.error("Failed to generate YAML", e);
+            console.warn("YAML generation failed", e);
         }
-    }, [schemaJsonString, businessRulesJsonString]);
+    }, [columns]);
 
     const loadData = async () => {
         try {
@@ -183,40 +195,28 @@ export default function TransformTemplatePage() {
         }
     };
 
-    const mapToColumnShape = (field: { name: string; type: string }) => {
-        const normalized = (field.type || '').toLowerCase();
-        let pg = 'TEXT';
-        if (normalized.includes('int')) pg = 'INTEGER';
-        else if (normalized.includes('float') || normalized.includes('double')) pg = 'DOUBLE PRECISION';
-        else if (normalized.includes('bool')) pg = 'BOOLEAN';
-        else if (normalized.includes('time') || normalized.includes('date')) pg = 'TIMESTAMP';
-        return {
-            name: field.name,
-            data_type: field.type,
-            quality_rules: { primary_key: false, not_null: false, format: '' },
-            business_rules: [],
-            constraints: { pg_type: pg, primary_key: false, not_null: false }
-        };
-    };
+    const mapToColumnShape = (c: any) => ({
+        name: c.name || c.column_name,
+        type: c.type || c.data_type || 'TEXT',
+        nullable: c.nullable !== false,
+        source_column: c.source_column || c.name || c.column_name,
+        pg_type: c.pg_type || c.type || c.data_type || 'TEXT',
+        quality_rules: c.quality_rules || [],
+        business_rules: c.business_rules || []
+    });
 
     const buildSchemaFromColumns = (cols: any[]) => {
-        const schemaCols = (cols || [])
-            .filter(c => c)
-            .map(c => {
-                const name = c.name || c.column_name;
-                if (!name) return null;
-                const constraints = c.constraints || {};
-                const qr = c.quality_rules || {};
-                return {
-                    name,
-                    data_type: c.data_type || c.type,
-                    pg_type: constraints.pg_type,
-                    primary_key: Boolean(constraints.primary_key || qr.primary_key),
-                    not_null: Boolean(constraints.not_null || qr.not_null)
-                };
-            })
-            .filter(Boolean);
-        return { columns: schemaCols };
+        return {
+            columns: (cols || []).map(c => ({
+                name: c.name,
+                type: c.type || c.data_type,
+                nullable: c.nullable,
+                source_column: c.source_column,
+                pg_type: c.pg_type,
+                quality_rules: c.quality_rules || [],
+                business_rules: c.business_rules || []
+            }))
+        };
     };
 
     const hydrateColumnsFromTable = async (sourceId: number, tableName: string) => {
@@ -260,41 +260,73 @@ export default function TransformTemplatePage() {
                     total_records: extractor.records_count || 0,
                     memory_size: extractor.data_volume || '0MB'
                 },
-                columns: buildSchemaFromColumns(shapedColumns).columns
+                columns: buildSchemaFromColumns(shapedColumns).columns,
+                transformation_pipeline: []
             };
 
-            setSchemaJsonString(JSON.stringify(schemaWithMetadata, null, 2));
+            setUnifiedConfigJsonString(JSON.stringify(schemaWithMetadata, null, 2));
         }
     };
 
     const updateColumnsFromManualSchema = () => {
         try {
-            const schema = JSON.parse(schemaJsonString);
-            if (schema && schema.columns) {
-                const updatedColumns = schema.columns.map((col: any) => ({
-                    name: col.name,
-                    data_type: col.data_type,
-                    quality_rules: {
-                        primary_key: col.primary_key,
-                        not_null: col.not_null,
-                        format: ''
-                    },
-                    business_rules: [],
-                    constraints: {
-                        pg_type: col.pg_type,
-                        primary_key: col.primary_key,
-                        not_null: col.not_null
-                    }
-                }));
-                setColumns(updatedColumns);
-                setLastSavedSchema(schema);
-                alert("Schema configuration saved! These columns are now available for rules.");
-            } else {
-                alert("Invalid schema format: 'columns' array missing.");
+            const parsed = JSON.parse(unifiedConfigJsonString);
+            if (parsed.columns && Array.isArray(parsed.columns)) {
+                setColumns(parsed.columns);
             }
+            alert("Configuration synced successfully!");
         } catch (e) {
-            alert("JSON Syntax Error: Please check your schema configuration.");
+            alert("Invalid JSON format. Please fix the structure before syncing.");
         }
+    };
+
+    const addManualRule = (rule: any) => {
+        const targetColumn = rule.params.column;
+        if (!targetColumn) {
+            alert("Please select a column for this rule");
+            return;
+        }
+
+        const columnExists = columns.some(c => c.name === targetColumn);
+
+        if (!columnExists) {
+            // If it's a new field (e.g. from AI or Derived Column), add it
+            setColumns(prev => [...prev, {
+                name: targetColumn,
+                data_type: 'TEXT', // default
+                quality_rules: {},
+                business_rules: [rule]
+            }]);
+            return;
+        }
+
+        setColumns(prev => prev.map(c => {
+            if (c.name === targetColumn) {
+                // Special case for Rename
+                if (rule.type === 'Rename column' && rule.params.new_name) {
+                    return {
+                        ...c,
+                        name: rule.params.new_name,
+                        business_rules: [...(c.business_rules || []), rule]
+                    };
+                }
+                return {
+                    ...c,
+                    business_rules: [...(c.business_rules || []), rule]
+                };
+            }
+            return c;
+        }));
+    };
+
+    const removeManualRule = (colName: string, ruleIdx: number) => {
+        setColumns(prev => prev.map(c => {
+            if (c.name === colName) {
+                const refreshedRules = (c.business_rules || []).filter((_: any, i: number) => i !== ruleIdx);
+                return { ...c, business_rules: refreshedRules };
+            }
+            return c;
+        }));
     };
 
     const handleSaveTemplate = async () => {
@@ -315,10 +347,10 @@ export default function TransformTemplatePage() {
                 config: {
                     columns,
                     business_rules: {
-                        english: businessRulesEnglish,
-                        json_source: businessRulesJsonString,
+                        json_source: unifiedConfigJsonString,
                         final_yaml: finalYaml
-                    }
+                    },
+                    load_strategy: dataLoadStrategy
                 }
             };
 
@@ -338,9 +370,7 @@ export default function TransformTemplatePage() {
             setTargetEntityName('');
             setColumns([]);
             setEditingTemplateId(null);
-            setBusinessRulesEnglish('');
-            setSchemaJsonString('{\n  "columns": []\n}');
-            setBusinessRulesJsonString('[\n\n]');
+            setUnifiedConfigJsonString('{\n  "columns": []\n}');
             setFinalYaml('');
             setActiveTab('list');
             loadData();
@@ -362,6 +392,8 @@ export default function TransformTemplatePage() {
             }
         }
     };
+
+
 
     return (
         <div className="flex flex-col min-h-screen p-6 space-y-8 animate-fade-in bg-[#f8fafc]">
@@ -556,14 +588,14 @@ export default function TransformTemplatePage() {
                                             )}
 
                                             <div>
-                                                <label className="block text-xs font-extrabold text-indigo-600 uppercase tracking-wider mb-2">Load Type</label>
+                                                <label className="block text-xs font-extrabold text-indigo-600 uppercase tracking-wider mb-2">Target Endpoint</label>
                                                 <div className="relative group">
                                                     <select
                                                         className="w-full p-4 bg-gray-50 border-2 border-slate-100 focus:border-emerald-500 focus:bg-white rounded-2xl transition-all outline-none appearance-none font-bold text-slate-700 cursor-pointer shadow-sm hover:border-emerald-200"
                                                         value={targetLoadType}
                                                         onChange={e => handleLoadTypeChange(e.target.value)}
                                                     >
-                                                        <option value="">Select Load Type...</option>
+                                                        <option value="">Select Target Endpoint...</option>
                                                         <option value="single_table">Single Table</option>
                                                         <option value="multi_table">Multi Table</option>
                                                         <option value="adhoc">Adhoc Load</option>
@@ -645,6 +677,7 @@ export default function TransformTemplatePage() {
                                                         </select>
                                                         <p className="text-xs text-gray-500">If selected, columns & types are pulled from the extractor's schema_info.</p>
                                                     </div>
+
                                                 </div>
                                             )}
 
@@ -663,6 +696,36 @@ export default function TransformTemplatePage() {
                                             {targetLoadType === 'multi_table' && (
                                                 <div className="animate-fade-in p-4 bg-yellow-50 text-yellow-700 rounded-2xl text-sm font-semibold border-2 border-yellow-100">
                                                     Multi-table configuration is handled in the Data Mapper service.
+                                                </div>
+                                            )}
+                                            {targetLoadType && (
+                                                <div className="mt-6 animate-fade-in pt-6 border-t border-slate-100">
+                                                    <label className="block text-xs font-extrabold text-indigo-600 uppercase tracking-wider mb-2">Data Load Strategy</label>
+                                                    <div className="relative group">
+                                                        <select
+                                                            className="w-full p-4 bg-gray-50 border-2 border-slate-100 focus:border-emerald-500 focus:bg-white rounded-2xl transition-all outline-none appearance-none font-bold text-slate-700 cursor-pointer shadow-sm hover:border-emerald-200"
+                                                            value={dataLoadStrategy}
+                                                            onChange={e => setDataLoadStrategy(e.target.value)}
+                                                        >
+                                                            <option value="Full Load">Full Load (Truncate & Load)</option>
+                                                            <option value="Append Load">Append Load (New Records Only)</option>
+                                                            <option value="Incremental Load">Incremental Load (Delta Processing)</option>
+                                                            <option value="Upsert / Merge (SCD1)">Upsert / Merge (SCD1)</option>
+                                                            <option value="SCD2 (history tracking)">SCD2 (History Tracking)</option>
+                                                            <option value="CDC load">CDC Load (Change Data Capture)</option>
+                                                        </select>
+                                                        <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-slate-400">
+                                                            <ChevronDown size={18} />
+                                                        </div>
+                                                    </div>
+                                                    <p className="mt-2 text-[10px] text-slate-400 font-bold uppercase italic leading-relaxed">
+                                                        {dataLoadStrategy === 'Full Load' && "• Truncates target table and loads all records fresh."}
+                                                        {dataLoadStrategy === 'Append Load' && "• Only loads new records found in source."}
+                                                        {dataLoadStrategy === 'Incremental Load' && "• Processes only incremental records based on markers."}
+                                                        {dataLoadStrategy === 'Upsert / Merge (SCD1)' && "• Updates existing records or inserts new ones."}
+                                                        {dataLoadStrategy === 'SCD2 (history tracking)' && "• Maintains historical versions of changed records."}
+                                                        {dataLoadStrategy === 'CDC load' && "• Replicates changes detected via database logs."}
+                                                    </p>
                                                 </div>
                                             )}
                                         </div>
@@ -712,143 +775,429 @@ export default function TransformTemplatePage() {
 
                     <div className="lg:col-span-8 flex flex-col h-full space-y-6">
 
-                        <div className="glass-panel p-6 rounded-3xl shadow-xl flex flex-col">
-                            <div className="flex justify-between items-center mb-4">
-                                <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2">
-                                    <Database className="text-indigo-600" size={20} />
-                                    Schema Configuration
-                                </h2>
+                        <div className="glass-panel p-8 rounded-[2rem] shadow-xl flex flex-col bg-white border-2 border-slate-100 relative group">
+                            <div className="flex justify-between items-start mb-8">
+                                <div>
+                                    <h2 className="text-3xl font-black text-slate-900 flex items-center gap-3">
+                                        <Settings className="text-indigo-600" size={32} />
+                                        Data Quality and Rules Config
+                                    </h2>
+                                    <p className="text-slate-500 font-medium mt-1">Manage schema definitions and business logic in one place</p>
+                                </div>
                                 <button
-                                    onClick={updateColumnsFromManualSchema}
-                                    className="px-4 py-2 bg-indigo-600 text-white text-xs font-bold rounded-xl shadow-lg hover:bg-indigo-500 transition-all flex items-center gap-2"
+                                    onClick={() => setIsUnifiedModalOpen(true)}
+                                    className="px-6 py-3 bg-indigo-600 text-white font-bold rounded-2xl hover:bg-indigo-500 transition-all flex items-center gap-2 shadow-lg shadow-indigo-200 active:scale-95"
                                 >
-                                    <Save size={14} /> Save Schema Configuration
+                                    <Edit3 size={18} /> Edit Blueprint
                                 </button>
                             </div>
-                            <p className="text-xs text-gray-500 mb-2 italic">You can rename columns or change types directly in the JSON above. Click Save once done.</p>
-                            <div className="relative flex-1">
-                                <textarea
-                                    className="w-full h-48 p-4 bg-slate-900 text-emerald-400 font-mono text-xs rounded-xl border-none focus:ring-2 focus:ring-indigo-500 shadow-inner custom-scrollbar"
-                                    value={schemaJsonString}
-                                    onChange={(e) => setSchemaJsonString(e.target.value)}
-                                    spellCheck={false}
-                                />
-                            </div>
-                        </div>
 
-                        {/* 2. Business Rules */}
-                        <div className="glass-panel p-6 rounded-3xl shadow-xl flex flex-col">
-                            <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2 mb-4">
-                                <Wand2 className="text-indigo-600" size={20} />
-                                Business Rules Configuration
-                            </h2>
-
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                {/* AI Assistant */}
-                                <div className="space-y-3">
-                                    <div className="flex justify-between items-center mb-1">
-                                        <label className="block text-xs font-black text-gray-400 uppercase tracking-widest">
-                                            AI Assistant (English Input)
-                                        </label>
-                                        {lastSavedSchema && (
-                                            <div className="flex items-center gap-1.5 px-2 py-1 bg-emerald-50 text-emerald-600 rounded-lg text-[10px] font-bold border border-emerald-100">
-                                                <CheckCircle size={10} /> Columns Fetched
-                                            </div>
-                                        )}
+                            <div className="flex flex-col gap-6">
+                                {/* Single Simplified Box - Extended Length */}
+                                <div className="bg-slate-900 rounded-[2rem] p-8 h-[600px] overflow-hidden relative cursor-pointer hover:ring-2 hover:ring-indigo-400 transition-all" onClick={() => setIsUnifiedModalOpen(true)}>
+                                    <div className="flex justify-between items-center mb-6">
+                                        <div className="text-[10px] font-black text-white/40 uppercase tracking-[0.2em]">Unified Configuration (Schema + Rules)</div>
+                                        <Database size={14} className="text-white/20" />
                                     </div>
-
-                                    <div className="flex flex-wrap gap-1.5 mb-2 max-h-20 overflow-y-auto p-2 bg-slate-50 rounded-xl border border-slate-100">
-                                        {columns.length > 0 ? columns.map(col => (
-                                            <span key={col.name} className="px-2 py-0.5 bg-white border border-slate-200 text-slate-600 rounded-md text-[10px] font-bold shadow-sm">
-                                                {col.name}
-                                            </span>
-                                        )) : (
-                                            <span className="text-[10px] text-slate-400 italic">No columns saved yet...</span>
-                                        )}
+                                    <div className="w-full h-full pb-20">
+                                        <pre className="text-white font-mono text-[10px] opacity-90 leading-relaxed overflow-y-auto h-full custom-scrollbar">{unifiedConfigJsonString}</pre>
                                     </div>
-
-                                    <textarea
-                                        className="w-full p-4 bg-white border-2 border-indigo-50 rounded-2xl text-sm font-medium focus:border-indigo-500 focus:bg-indigo-50/30 transition-all outline-none resize-none h-32"
-                                        placeholder="Describe your rules... (e.g., Make order_id primary key)"
-                                        value={businessRulesEnglish}
-                                        onChange={(e) => setBusinessRulesEnglish(e.target.value)}
-                                    />
-                                    <button
-                                        onClick={async () => {
-                                            if (!businessRulesEnglish) return;
-                                            setIsGeneratingRules(true);
-                                            try {
-                                                // Enhance prompt with column context if available
-                                                const contextPrompt = columns.length > 0
-                                                    ? `Based on existing columns [${columns.map(c => c.name).join(', ')}]: ${businessRulesEnglish}`
-                                                    : businessRulesEnglish;
-
-                                                const rules = await generateBusinessRules(contextPrompt);
-                                                setBusinessRulesJsonString(JSON.stringify(rules, null, 2));
-                                            } catch (error) {
-                                                console.error("Failed to generate rules", error);
-                                                alert("Failed to generate rules. Please try again.");
-                                            } finally {
-                                                setIsGeneratingRules(false);
-                                            }
-                                        }}
-                                        disabled={isGeneratingRules || !businessRulesEnglish}
-                                        className="w-full py-2.5 bg-gradient-to-r from-indigo-600 to-purple-600 text-white font-bold rounded-xl shadow-lg shadow-indigo-200 hover:shadow-indigo-300 active:scale-95 transition-all flex items-center justify-center gap-2"
-                                    >
-                                        {isGeneratingRules ? (
-                                            <>
-                                                <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                                                Processing with AI...
-                                            </>
-                                        ) : (
-                                            <>
-                                                <Wand2 size={16} /> Fetch Schema & Generate Rules
-                                            </>
-                                        )}
-                                    </button>
+                                    <div className="absolute inset-x-0 bottom-0 h-32 bg-gradient-to-t from-slate-900 via-slate-900/80 to-transparent pointer-events-none" />
                                 </div>
+                            </div>
 
-                                {/* JSON Rules Editor */}
-                                <div className="space-y-3">
-                                    <label className="block text-xs font-black text-gray-400 uppercase tracking-widest flex justify-between">
-                                        <span>Rules Specification (JSON)</span>
-                                        <span className="text-emerald-500">Editable</span>
-                                    </label>
-                                    <textarea
-                                        className="w-full h-44 p-4 bg-slate-900 text-yellow-300 font-mono text-xs rounded-xl border-none focus:ring-2 focus:ring-indigo-500 shadow-inner custom-scrollbar"
-                                        value={businessRulesJsonString}
-                                        onChange={(e) => setBusinessRulesJsonString(e.target.value)}
-                                        spellCheck={false}
-                                        placeholder="[]"
-                                    />
+                            <div className="mt-8 pt-8 border-t border-slate-50">
+                                <div className="flex items-center justify-between">
+                                    <div className="flex items-center gap-4">
+                                        <div className="px-4 py-2 bg-indigo-50 rounded-xl text-indigo-600 font-bold text-xs">
+                                            {columns.length} Fields Configured
+                                        </div>
+                                        <div className="px-4 py-2 bg-emerald-50 rounded-xl text-emerald-600 font-bold text-xs">
+                                            {columns.reduce((acc, col) => acc + (col.business_rules?.length || 0), 0)} Rules Active
+                                        </div>
+                                    </div>
+                                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Click edit to modify your blueprint</p>
                                 </div>
                             </div>
                         </div>
 
-                        {/* 3. Final YAML Preview */}
-                        <div className="glass-panel p-6 rounded-3xl shadow-xl flex flex-col flex-1 bg-slate-800 border-slate-700">
-                            <h2 className="text-xl font-bold text-white flex items-center gap-2 mb-4">
-                                <FileJson className="text-emerald-400" size={20} />
-                                Final Combined YAML
-                            </h2>
-                            <p className="text-xs text-slate-400 mb-2">This is the final configuration that will be used by the Mapper Service.</p>
-                            <div className="relative flex-1">
-                                <textarea
-                                    readOnly
-                                    className="w-full h-[300px] p-5 bg-slate-950 text-slate-300 font-mono text-xs rounded-2xl border border-slate-700 focus:outline-none custom-scrollbar"
-                                    value={finalYaml}
-                                />
-                                <div className="absolute top-4 right-4">
-                                    <span className="px-3 py-1 bg-slate-800 text-slate-400 text-[10px] font-bold uppercase tracking-widest rounded-lg border border-slate-700">
-                                        Read Only
-                                    </span>
-                                </div>
-                            </div>
-                        </div>
 
                     </div>
                 </div>
             )}
+
+            {/* Unified Blueprint Modal */}
+            <Modal
+                title="Data Quality and Rules Configuration"
+                isOpen={isUnifiedModalOpen}
+                onClose={() => setIsUnifiedModalOpen(false)}
+                actions={
+                    <>
+                        <button
+                            onClick={() => {
+                                updateColumnsFromManualSchema();
+                                setIsUnifiedModalOpen(false);
+                            }}
+                            className="px-8 py-4 bg-indigo-600 text-white font-black uppercase tracking-widest rounded-2xl hover:bg-indigo-500 transition-all flex items-center gap-3 shadow-xl shadow-indigo-200"
+                        >
+                            <Save size={20} /> Save Configuration
+                        </button>
+                    </>
+                }
+            >
+                <div className="flex flex-col h-full space-y-8 min-h-[70vh]">
+                    <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 h-full animate-in fade-in slide-in-from-right-10 duration-500 pb-10">
+                        {/* Left Side: Rule Builder */}
+                        <div className="lg:col-span-4 space-y-6">
+                            <div className="bg-white p-6 rounded-[2rem] border-2 border-slate-100 shadow-sm space-y-6">
+                                <h4 className="text-xs font-black text-indigo-600 uppercase tracking-widest">Manual Rule Builder</h4>
+
+                                <div className="space-y-4">
+                                    <div>
+                                        <label className="block text-[10px] font-bold text-slate-400 uppercase mb-2 ml-1">Rule Type</label>
+                                        <select
+                                            className="w-full p-4 bg-slate-50 border-2 border-transparent focus:border-indigo-600 focus:bg-white rounded-2xl text-sm font-bold outline-none transition-all"
+                                            value={newRuleType}
+                                            onChange={(e) => {
+                                                setNewRuleType(e.target.value);
+                                                setNewRuleParams({});
+                                            }}
+                                        >
+                                            <option value="">Select a rule...</option>
+                                            <option value="Rename column">1. Rename column</option>
+                                            <option value="Cast datatype">2. Cast datatype</option>
+                                            <option value="Trim / Lowercase / Uppercase">3. Trim / Lowercase / Uppercase</option>
+                                            <option value="Replace values">4. Replace values</option>
+                                            <option value="Conditional rule (if/else)">5. Conditional rule (if/else)</option>
+                                            <option value="Lookup rule (join with master table)">6. Lookup rule (join with master table)</option>
+                                            <option value="Derived column">7. Derived column</option>
+                                            <option value="Dropping columns">8. Dropping columns</option>
+                                            <option value="Custom Business Rules">9. Custom Business Rules</option>
+                                        </select>
+                                    </div>
+
+                                    {newRuleType && (
+                                        <div className="p-4 bg-indigo-50/50 rounded-2xl border border-indigo-100 space-y-4 animate-in fade-in slide-in-from-top-2 duration-300">
+                                            {/* Rename Column */}
+                                            {newRuleType === 'Rename column' && (
+                                                <div className="space-y-3">
+                                                    <select
+                                                        className="w-full p-3 bg-white border border-slate-200 rounded-xl text-xs font-bold"
+                                                        value={newRuleParams.column || ''}
+                                                        onChange={e => setNewRuleParams({ ...newRuleParams, column: e.target.value })}
+                                                    >
+                                                        <option value="">Select Source Column</option>
+                                                        {columns.map((c, idx) => <option key={`${c.name}-${idx}`} value={c.name}>{c.name}</option>)}
+                                                    </select>
+                                                    <textarea
+                                                        placeholder="Enter new column name"
+                                                        className="w-full p-4 bg-white border border-slate-200 rounded-xl text-xs font-bold h-32 resize-none shadow-inner"
+                                                        value={newRuleParams.new_name || ''}
+                                                        onChange={e => setNewRuleParams({ ...newRuleParams, new_name: e.target.value })}
+                                                    />
+                                                </div>
+                                            )}
+
+                                            {/* Cast Datatype */}
+                                            {newRuleType === 'Cast datatype' && (
+                                                <div className="space-y-3">
+                                                    <select
+                                                        className="w-full p-3 bg-white border border-slate-200 rounded-xl text-xs font-bold"
+                                                        value={newRuleParams.column || ''}
+                                                        onChange={e => setNewRuleParams({ ...newRuleParams, column: e.target.value })}
+                                                    >
+                                                        <option value="">Select Column</option>
+                                                        {columns.map((c, idx) => <option key={`${c.name}-${idx}`} value={c.name}>{c.name}</option>)}
+                                                    </select>
+                                                    <select
+                                                        className="w-full p-3 bg-white border border-slate-200 rounded-xl text-xs font-bold"
+                                                        value={newRuleParams.target_type || ''}
+                                                        onChange={e => setNewRuleParams({ ...newRuleParams, target_type: e.target.value })}
+                                                    >
+                                                        <option value="">Target Type</option>
+                                                        <option value="INTEGER">Integer</option>
+                                                        <option value="DOUBLE PRECISION">Decimal / Float</option>
+                                                        <option value="TEXT">String / Text</option>
+                                                        <option value="TIMESTAMP">Date / Time</option>
+                                                        <option value="BOOLEAN">Boolean</option>
+                                                    </select>
+                                                </div>
+                                            )}
+
+                                            {newRuleType === 'Trim / Lowercase / Uppercase' && (
+                                                <div className="space-y-3">
+                                                    <select
+                                                        className="w-full p-3 bg-white border border-slate-200 rounded-xl text-xs font-bold"
+                                                        value={newRuleParams.column || ''}
+                                                        onChange={e => setNewRuleParams({ ...newRuleParams, column: e.target.value })}
+                                                    >
+                                                        <option value="">Select Column</option>
+                                                        {columns.map((c, idx) => <option key={`${c.name}-${idx}`} value={c.name}>{c.name}</option>)}
+                                                    </select>
+                                                    <select
+                                                        className="w-full p-3 bg-white border border-slate-200 rounded-xl text-xs font-bold"
+                                                        value={newRuleParams.operation || ''}
+                                                        onChange={e => setNewRuleParams({ ...newRuleParams, operation: e.target.value })}
+                                                    >
+                                                        <option value="">Select Operation</option>
+                                                        <option value="trim">Trim</option>
+                                                        <option value="lowercase">Lowercase</option>
+                                                        <option value="uppercase">Uppercase</option>
+                                                    </select>
+                                                </div>
+                                            )}
+
+                                            {/* Replace Values */}
+                                            {newRuleType === 'Replace values' && (
+                                                <div className="space-y-3">
+                                                    <select
+                                                        className="w-full p-3 bg-white border border-slate-200 rounded-xl text-xs font-bold"
+                                                        value={newRuleParams.column || ''}
+                                                        onChange={e => setNewRuleParams({ ...newRuleParams, column: e.target.value })}
+                                                    >
+                                                        <option value="">Select Column</option>
+                                                        {columns.map((c, idx) => <option key={`${c.name}-${idx}`} value={c.name}>{c.name}</option>)}
+                                                    </select>
+                                                    <input
+                                                        type="text"
+                                                        placeholder="Find Value"
+                                                        className="w-full p-3 bg-white border border-slate-200 rounded-xl text-xs font-bold"
+                                                        value={newRuleParams.find || ''}
+                                                        onChange={e => setNewRuleParams({ ...newRuleParams, find: e.target.value })}
+                                                    />
+                                                    <input
+                                                        type="text"
+                                                        placeholder="Replace With"
+                                                        className="w-full p-3 bg-white border border-slate-200 rounded-xl text-xs font-bold"
+                                                        value={newRuleParams.replace || ''}
+                                                        onChange={e => setNewRuleParams({ ...newRuleParams, replace: e.target.value })}
+                                                    />
+                                                </div>
+                                            )}
+
+                                            {/* Conditional Rule */}
+                                            {newRuleType === 'Conditional rule (if/else)' && (
+                                                <div className="space-y-3">
+                                                    <select
+                                                        className="w-full p-3 bg-white border border-slate-200 rounded-xl text-xs font-bold"
+                                                        value={newRuleParams.column || ''}
+                                                        onChange={e => setNewRuleParams({ ...newRuleParams, column: e.target.value })}
+                                                    >
+                                                        <option value="">Select Column</option>
+                                                        {columns.map((c, idx) => <option key={`${c.name}-${idx}`} value={c.name}>{c.name}</option>)}
+                                                    </select>
+                                                    <input
+                                                        type="text"
+                                                        placeholder="Condition (e.g. > 100)"
+                                                        className="w-full p-3 bg-white border border-slate-200 rounded-xl text-xs font-bold"
+                                                        value={newRuleParams.condition || ''}
+                                                        onChange={e => setNewRuleParams({ ...newRuleParams, condition: e.target.value })}
+                                                    />
+                                                    <input
+                                                        type="text"
+                                                        placeholder="Value if True"
+                                                        className="w-full p-3 bg-white border border-slate-200 rounded-xl text-xs font-bold"
+                                                        value={newRuleParams.true_val || ''}
+                                                        onChange={e => setNewRuleParams({ ...newRuleParams, true_val: e.target.value })}
+                                                    />
+                                                    <input
+                                                        type="text"
+                                                        placeholder="Value if False"
+                                                        className="w-full p-3 bg-white border border-slate-200 rounded-xl text-xs font-bold"
+                                                        value={newRuleParams.false_val || ''}
+                                                        onChange={e => setNewRuleParams({ ...newRuleParams, false_val: e.target.value })}
+                                                    />
+                                                </div>
+                                            )}
+
+                                            {/* Lookup Rule */}
+                                            {newRuleType === 'Lookup rule (join with master table)' && (
+                                                <div className="space-y-3">
+                                                    <select
+                                                        className="w-full p-3 bg-white border border-slate-200 rounded-xl text-xs font-bold"
+                                                        value={newRuleParams.column || ''}
+                                                        onChange={e => setNewRuleParams({ ...newRuleParams, column: e.target.value })}
+                                                    >
+                                                        <option value="">Join Key Column</option>
+                                                        {columns.map((c, idx) => <option key={`${c.name}-${idx}`} value={c.name}>{c.name}</option>)}
+                                                    </select>
+                                                    <input
+                                                        type="text"
+                                                        placeholder="Master Table Name"
+                                                        className="w-full p-3 bg-white border border-slate-200 rounded-xl text-xs font-bold"
+                                                        value={newRuleParams.master_table || ''}
+                                                        onChange={e => setNewRuleParams({ ...newRuleParams, master_table: e.target.value })}
+                                                    />
+                                                    <input
+                                                        type="text"
+                                                        placeholder="Master Lookup Key"
+                                                        className="w-full p-3 bg-white border border-slate-200 rounded-xl text-xs font-bold"
+                                                        value={newRuleParams.master_key || ''}
+                                                        onChange={e => setNewRuleParams({ ...newRuleParams, master_key: e.target.value })}
+                                                    />
+                                                    <input
+                                                        type="text"
+                                                        placeholder="Fetch Column"
+                                                        className="w-full p-3 bg-white border border-slate-200 rounded-xl text-xs font-bold"
+                                                        value={newRuleParams.fetch_col || ''}
+                                                        onChange={e => setNewRuleParams({ ...newRuleParams, fetch_col: e.target.value })}
+                                                    />
+                                                </div>
+                                            )}
+
+                                            {/* Derived Column */}
+                                            {newRuleType === 'Derived column' && (
+                                                <div className="space-y-3">
+                                                    <input
+                                                        type="text"
+                                                        placeholder="New Column Name"
+                                                        className="w-full p-3 bg-white border border-slate-200 rounded-xl text-xs font-bold"
+                                                        value={newRuleParams.column || ''}
+                                                        onChange={e => setNewRuleParams({ ...newRuleParams, column: e.target.value })}
+                                                    />
+                                                    <textarea
+                                                        placeholder="Expression (e.g. col_a + col_b)"
+                                                        className="w-full p-3 bg-white border border-slate-200 rounded-xl text-xs font-bold h-20"
+                                                        value={newRuleParams.expression || ''}
+                                                        onChange={e => setNewRuleParams({ ...newRuleParams, expression: e.target.value })}
+                                                    />
+                                                </div>
+                                            )}
+
+                                            {/* Dropping Columns */}
+                                            {newRuleType === 'Dropping columns' && (
+                                                <div className="space-y-3">
+                                                    <select
+                                                        className="w-full p-3 bg-white border border-slate-200 rounded-xl text-xs font-bold"
+                                                        value={newRuleParams.column || ''}
+                                                        onChange={e => setNewRuleParams({ ...newRuleParams, column: e.target.value })}
+                                                    >
+                                                        <option value="">Select Column to Drop</option>
+                                                        {columns.map((c, idx) => <option key={`${c.name}-${idx}`} value={c.name}>{c.name}</option>)}
+                                                    </select>
+                                                </div>
+                                            )}
+
+                                            {/* Custom Business Rules - AI Powered */}
+                                            {newRuleType === 'Custom Business Rules' && (
+                                                <div className="space-y-3">
+                                                    <select
+                                                        className="w-full p-3 bg-white border border-slate-200 rounded-xl text-xs font-bold"
+                                                        value={newRuleParams.column || ''}
+                                                        onChange={e => setNewRuleParams({ ...newRuleParams, column: e.target.value })}
+                                                    >
+                                                        <option value="">Select Context Column (Optional)</option>
+                                                        {columns.map((c, idx) => <option key={`${c.name}-${idx}`} value={c.name}>{c.name}</option>)}
+                                                    </select>
+                                                    <textarea
+                                                        placeholder="Describe your rule in plain English (e.g. 'If age is > 18 then mark as adult, else minor')"
+                                                        className="w-full p-4 bg-white border border-slate-200 rounded-xl text-xs font-bold h-32 resize-none shadow-inner"
+                                                        value={newRuleParams.english || ''}
+                                                        onChange={e => setNewRuleParams({ ...newRuleParams, english: e.target.value })}
+                                                    />
+                                                </div>
+                                            )}
+
+                                            <button
+                                                onClick={async () => {
+                                                    if (newRuleType === 'Custom Business Rules' && newRuleParams.english) {
+                                                        setIsGeneratingRules(true);
+                                                        try {
+                                                            const aiRules = await generateBusinessRules(newRuleParams.english);
+                                                            if (aiRules && Array.isArray(aiRules)) {
+                                                                aiRules.forEach((rule: any) => {
+                                                                    // Use AI detected column, or fallback to UI selected context column
+                                                                    const colToUse = rule.params?.column || newRuleParams.column;
+                                                                    if (colToUse) {
+                                                                        const finalRule = {
+                                                                            ...rule,
+                                                                            params: {
+                                                                                ...rule.params,
+                                                                                column: colToUse
+                                                                            }
+                                                                        };
+                                                                        addManualRule(finalRule);
+                                                                    } else {
+                                                                        console.warn("AI rule missing column mapping, skipping", rule);
+                                                                    }
+                                                                });
+                                                            }
+                                                        } catch (e) {
+                                                            console.error("AI Generation failed", e);
+                                                            alert("Failed to generate rules from English description.");
+                                                        } finally {
+                                                            setIsGeneratingRules(false);
+                                                        }
+                                                    } else {
+                                                        addManualRule({ type: newRuleType, params: newRuleParams });
+                                                    }
+                                                    setNewRuleType('');
+                                                    setNewRuleParams({});
+                                                }}
+                                                disabled={isGeneratingRules || !newRuleType}
+                                                className="w-full py-4 bg-indigo-600 text-white text-xs font-black uppercase tracking-widest rounded-2xl shadow-lg hover:bg-indigo-500 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                                            >
+                                                {isGeneratingRules ? (
+                                                    <>
+                                                        <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                                                        AI Analyzing...
+                                                    </>
+                                                ) : (
+                                                    <>
+                                                        <Plus size={18} /> Add Rule
+                                                    </>
+                                                )}
+                                            </button>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+
+                            <div className="space-y-4 overflow-y-auto max-h-[400px] custom-scrollbar">
+                                <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest ml-1">Transformation Pipeline</h4>
+                                <div className="space-y-2">
+                                    {columns.flatMap(col => (col.business_rules || []).map((rule: any, ruleIdx: number) => ({ ...rule, colName: col.name, ruleIdx }))).map((rule, idx) => (
+                                        <div key={`${rule.colName}-${rule.ruleIdx}`} className="group flex items-center justify-between p-4 bg-white border border-slate-100 rounded-2xl shadow-sm hover:border-indigo-200 transition-all">
+                                            <div className="flex items-center gap-4">
+                                                <span className="flex items-center justify-center w-8 h-8 bg-indigo-50 text-indigo-600 rounded-full text-xs font-black">
+                                                    {idx + 1}
+                                                </span>
+                                                <div>
+                                                    <p className="text-[11px] font-bold text-slate-800">{rule.type}</p>
+                                                    <p className="text-[9px] text-slate-400 font-medium">Column: {rule.colName}</p>
+                                                </div>
+                                            </div>
+                                            <button
+                                                onClick={() => removeManualRule(rule.colName, rule.ruleIdx)}
+                                                className="p-2 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
+                                            >
+                                                <Trash2 size={16} />
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Right Side: Unified Config Editor */}
+                        <div className="lg:col-span-8 flex flex-col space-y-4 h-full">
+                            <div className="flex justify-between items-center px-1">
+                                <label className="text-xs font-black text-slate-800 uppercase tracking-widest flex items-center gap-2">
+                                    <Database size={16} className="text-indigo-600" />
+                                    Unified Configuration (JSON)
+                                </label>
+                                <span className="text-[10px] font-bold text-slate-400 italic">Live editing enabled</span>
+                            </div>
+                            <textarea
+                                className="w-full flex-1 min-h-[500px] p-8 bg-slate-900 text-white font-mono text-sm rounded-[2.5rem] border-none focus:ring-8 focus:ring-indigo-500/10 shadow-2xl custom-scrollbar"
+                                value={unifiedConfigJsonString}
+                                onChange={(e) => setUnifiedConfigJsonString(e.target.value)}
+                                spellCheck={false}
+                            />
+                        </div>
+                    </div>
+                </div>
+            </Modal>
         </div>
     );
 }

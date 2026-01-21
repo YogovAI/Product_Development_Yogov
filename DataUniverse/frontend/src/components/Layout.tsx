@@ -23,8 +23,8 @@ export default function Layout() {
     ];
 
     const transformerNav = [
-        { name: 'Transformer Templates', path: '/transform', icon: Wand2 },
         { name: 'Mapper Services', path: '/mapper', icon: ArrowLeftRight },
+        { name: 'Transformer Templates', path: '/transform', icon: Wand2 },
     ];
 
     const extraNav = [

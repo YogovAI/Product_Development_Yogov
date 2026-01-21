@@ -85,7 +85,11 @@ class ExtractorServiceResponse(ExtractorServiceBase):
 class MapperServiceBase(BaseModel):
     name: str
     extractor_id: int
-    template_id: int
+    template_id: Optional[int] = None
+    target_source_id: Optional[int] = None
+    target_entity_type: Optional[str] = None
+    target_entity: Optional[str] = None
+    load_strategy: Optional[str] = None
     mapping_config: Dict[str, Any]
 
 class MapperServiceCreate(MapperServiceBase):

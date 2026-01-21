@@ -12,3 +12,5 @@ dask[complete]
 distributed
 bokeh
 google-generativeai
+openai
+python-dotenv

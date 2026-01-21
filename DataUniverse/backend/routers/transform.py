@@ -120,7 +120,11 @@ async def delete_template(template_id: int, db: AsyncSession = Depends(get_db)):
     await db.commit()
     return None
 
+import os
+import json
 from pydantic import BaseModel
+from openai import OpenAI
+from dotenv import load_dotenv
 
 class RulesGenerationRequest(BaseModel):
     text: str
@@ -128,78 +132,49 @@ class RulesGenerationRequest(BaseModel):
 @router.post("/generate_rules")
 async def generate_business_rules(request: RulesGenerationRequest):
     """
-    Mock AI endpoint to convert English natural language into structured JSON business rules.
+    Real AI endpoint using OpenAI to convert English natural language into structured JSON business rules.
     """
-    text = request.text.lower()
-    rules = []
-    
-    # Simple heuristic parsing (Mock AI)
-    # 1. Split logic: "Split review/helpfulness into review and helpfulness"
-    if "split" in text:
-        parts = text.split("split")[-1].split("into")
-        if len(parts) == 2:
-            source = parts[0].strip().replace("/", "") # simplistic cleanup
-            targets = [t.strip().replace(" and ", "").replace(".", "") for t in parts[1].split(",")]
-            # Handle "and" in the last part
-            final_targets = []
-            for t in targets:
-                if " and " in t:
-                    final_targets.extend(t.split(" and "))
-                else:
-                    final_targets.append(t)
-            
-            # Clean up targets further
-            final_targets = [t.strip().split(" ")[0] for t in final_targets] # take first word if multiple
-            
-            rules.append({
-                "type": "split",
-                "source_column": source,
-                "delimiter": "/", # Default assumption or need more parsing
-                "outputs": [{"name": t, "index": i} for i, t in enumerate(final_targets)]
-            })
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return [{"type": "error", "params": {"message": "OPENAI_API_KEY not configured in backend environment."}}]
 
-    # 2. Key logic: "Make business_id primary key"
-    if "primary key" in text:
-        words = text.split(" ")
-        try:
-            # excessive simplistic: find word before 'primary' or 'is primary'
-            pk_idx = words.index("primary")
-            if pk_idx > 0:
-                col = words[pk_idx - 1]
-                if col in ["is", "make"]: # "business_id is primary..."
-                    col = words[pk_idx - 2]
-                rules.append({
-                    "type": "constraint",
-                    "column": col,
-                    "constraint": "primary_key",
-                    "value": True
-                })
-        except:
-            pass
-            
-    # 3. Cast logic: "Cast helpfulness to integer"
-    if "cast" in text:
-        try:
-            parts = text.split("cast")[-1].split("to")
-            col = parts[0].strip()
-            dtype = parts[1].strip().replace(".", "")
-            rules.append({
-                "type": "cast",
-                "column": col,
-                "target_type": dtype
-            })
-        except:
-            pass
+    client = OpenAI(api_key=api_key)
 
-    # 4. Standard business rules mentioned in prompt example
-    # "Split review/helpfulness into review and helpfulness. Make business_id primary key and not null. Cast helpfulness to integer."
+    system_prompt = """
+    You are a Data Engineering AI assistant. Your task is to convert English descriptions of data transformation rules into a list of structured JSON objects.
     
-    # If no rules matched via simple heuristics, return a dummy template so the user sees something
-    if not rules:
-        rules.append({
-            "type": "unknown",
-            "description": "Could not parse rule: " + request.text,
-            "suggestion": "Try format: 'Split [col] into [a, b]', 'Cast [col] to [type]'"
-        })
+    Supported Rule Types and Formats:
+    1. Rename column: {"type": "Rename column", "params": {"column": "old_name", "new_name": "new_name"}}
+    2. Cast datatype: {"type": "Cast datatype", "params": {"column": "col", "target_type": "INTEGER|TEXT|DOUBLE PRECISION|TIMESTAMP|BOOLEAN"}}
+    3. String Ops: {"type": "Trim / Lowercase / Uppercase", "params": {"column": "col", "operation": "trim|lowercase|uppercase"}}
+    4. Replace: {"type": "Replace values", "params": {"column": "col", "find": "val", "replace": "new_val"}}
+    5. Conditional: {"type": "Conditional rule (if/else)", "params": {"column": "col", "condition": "logic", "true_val": "x", "false_val": "y"}}
+    6. Lookup: {"type": "Lookup rule (join with master table)", "params": {"column": "source_key", "master_table": "tbl", "master_key": "m_key", "fetch_col": "target"}}
+    7. Derived: {"type": "Derived column", "params": {"column": "new_col", "expression": "sql_like_expression"}}
+    8. Drop: {"type": "Dropping columns", "params": {"column": "col_to_drop"}}
+
+    Return ONLY a valid JSON list of these objects. No markdown, no explanations.
+    """
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o", # or gpt-3.5-turbo
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Transform these requirements into JSON rules: {request.text}"}
+            ],
+            response_format={ "type": "json_object" } if "gpt-4o" in "gpt-4o" else None
+        )
         
-    return rules
+        content = response.choices[0].message.content
+        # OpenAI might return a wrapper object if response_format is used
+        parsed = json.loads(content)
+        if isinstance(parsed, dict) and "rules" in parsed:
+            return parsed["rules"]
+        if isinstance(parsed, dict) and not isinstance(parsed, list):
+            # If AI returns a single object instead of list, wrap it
+            return [parsed]
+        return parsed
+    except Exception as e:
+        print(f"OpenAI Error: {e}")
+        return [{"type": "error", "params": {"message": str(e)}}]

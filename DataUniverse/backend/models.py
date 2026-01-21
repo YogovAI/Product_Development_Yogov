@@ -83,12 +83,17 @@ class MapperService(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, index=True)
     extractor_id = Column(Integer, ForeignKey("extractor_services.id"))
-    template_id = Column(Integer, ForeignKey("transform_templates.id"))
+    template_id = Column(Integer, ForeignKey("transform_templates.id"), nullable=True) # Optional now
+    target_source_id = Column(Integer, ForeignKey("data_sources.id"), nullable=True) # Direct target
+    target_entity_type = Column(String, nullable=True) # single_table, multi_table, api, adhoc
+    target_entity = Column(String, nullable=True) # Table/Entity name/API URL
+    load_strategy = Column(String, nullable=True) # Full Load, Append, CDC, etc.
     mapping_config = Column(JSON) # Detailed column level mappings
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     extractor = relationship("ExtractorService")
     template = relationship("TransformTemplate")
+    target_source = relationship("DataSource")
 
 class LoaderService(Base):
     __tablename__ = "loader_services"

@@ -1,6 +1,12 @@
+import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+from dotenv import load_dotenv
+
+# Load environment variables from the .env file in the current directory
+load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
+
 from .database import engine, Base
 from .routers import sources, etl, spark, rag, mapper, logs, transform, dask, cluster, extractors, loaders
 

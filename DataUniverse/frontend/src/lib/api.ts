@@ -73,7 +73,11 @@ export interface MapperService {
     id: number;
     name: string;
     extractor_id: number;
-    template_id: number;
+    template_id?: number;
+    target_source_id?: number;
+    target_entity_type?: string;
+    target_entity?: string;
+    load_strategy?: string;
     mapping_config: any;
     created_at: string;
 }
@@ -118,6 +122,7 @@ export interface TransformTemplate {
     target_entity_type?: string;
     target_entity_name?: string;
     config: {
+        load_strategy?: string;
         business_rules?: {
             english?: string;
             json_source?: string;
@@ -128,7 +133,7 @@ export interface TransformTemplate {
             name: string;
             data_type: string;
             quality_rules: Record<string, any>;
-            business_rules: string[];
+            business_rules: any[];
             constraints?: {
                 pg_type?: string; // e.g., INTEGER, TEXT, VARCHAR(255)
                 primary_key?: boolean;
